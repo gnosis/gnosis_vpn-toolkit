@@ -1,0 +1,44 @@
+# gnosis_vpn-update — the self-updater, the first binary of the toolkit.
+#
+# A lib + bin crate: all feature logic lives in the lib (so it is unit-testable
+# and gives nix-lib's `cargo … --lib` deps build a target), and src/main.rs is a
+# thin binary that parses the CLI and dispatches into it. Cross-binary helpers
+# (stdout NDJSON `output`, stderr `logging`) live here for now; they will move
+# to a shared crate once a second binary needs them.
+[package]
+edition = { workspace = true }
+license = { workspace = true }
+name    = "gnosis_vpn-update"
+version = { workspace = true }
+
+[lib]
+doctest = false
+
+[dependencies]
+anyhow             = { workspace = true }
+bytesize           = { workspace = true }
+chrono             = { workspace = true }
+clap               = { workspace = true }
+exitcode           = { workspace = true }
+reqwest            = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+serde_with         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+url                = { workspace = true }
+
+# Avoid musl's default allocator due to degraded performance.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = { workspace = true }
+
+# sha2 (artifact verification) and libc (statvfs free-space probe) are only used
+# on the macOS install path; on Linux the update goes through apt.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+libc = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

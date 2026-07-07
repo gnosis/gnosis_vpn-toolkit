@@ -1,11 +1,12 @@
-# toolkit.nix - gnosis_vpn-toolkit package definitions
+# toolkit.nix - gnosis_vpn-toolkit workspace package definitions
 #
 # Package definitions using HOPR nix-lib build tools (nixLib.mkRustPackage) for
 # consistent, reproducible builds across platforms. Adapted from
-# gnosis_vpn-client's nix/gnosisvpn.nix, simplified for a single-crate binary:
+# gnosis_vpn-client's nix/gnosisvpn.nix. The repo is a virtual Cargo workspace;
+# each binary is selected with a `--bin` flag against the workspace root (the
+# first is `--bin gnosis_vpn-update`). Notes vs the client:
 #   * no libmnl / libnftnl / sqlite (no killswitch / routing / db) — reqwest's
 #     openssl + cacert come from nix-lib's defaults, so no extra build inputs.
-#   * builds a single `--bin gnosis_vpn-toolkit`.
 #   * no shell completions, no system-test derivation.
 {
   lib,
@@ -31,7 +32,7 @@ let
       inherit fs;
       root = ../.;
       extraFiles = [
-        ../gnosisvpn-public-key.asc
+        ../gnosis_vpn-update/gnosisvpn-public-key.asc
       ];
     };
     test = nixLib.mkTestSrc {
@@ -39,15 +40,15 @@ let
       root = ../.;
       # The manifest fixture data files are read by the check tests at
       # CARGO_MANIFEST_DIR/tests/fixtures; include them so the sandboxed test
-      # source has them (mkTestSrc only picks up `.rs` test files by default).
+      # source has them (mkTestSrc only picks up `.rs`/`.toml` files by default).
       extraFiles = [
-        ../gnosisvpn-public-key.asc
-        ../tests/fixtures/linux-amd64.json
-        ../tests/fixtures/linux-amd64.json.asc
-        ../tests/fixtures/linux-arm64.json
-        ../tests/fixtures/linux-arm64.json.asc
-        ../tests/fixtures/macos-arm64.json
-        ../tests/fixtures/macos-arm64.json.asc
+        ../gnosis_vpn-update/gnosisvpn-public-key.asc
+        ../gnosis_vpn-update/tests/fixtures/linux-amd64.json
+        ../gnosis_vpn-update/tests/fixtures/linux-amd64.json.asc
+        ../gnosis_vpn-update/tests/fixtures/linux-arm64.json
+        ../gnosis_vpn-update/tests/fixtures/linux-arm64.json.asc
+        ../gnosis_vpn-update/tests/fixtures/macos-arm64.json
+        ../gnosis_vpn-update/tests/fixtures/macos-arm64.json.asc
       ];
     };
     deps = nixLib.mkDepsSrc {
@@ -130,31 +131,39 @@ let
         '';
     });
 
-  # Single package with one lib + one bin target: no `--bin`/`-p` filter, so
-  # the test derivation runs the lib unit tests (a `--bin` selector would limit
-  # `cargo test` to the binary target and silently skip them).
+  # Shared build args over the whole workspace. `prependPackageName = false`
+  # skips the automatic `-p gnosis_vpn-toolkit` that nix-lib would derive from
+  # [workspace.metadata.crane].name — it has no matching package in this virtual
+  # workspace. Binary derivations select their target via `extraCargoArgs`
+  # (`--bin gnosis_vpn-update`); the checks pass none, so tests/clippy/docs stay
+  # workspace-wide (`cargoTestExtraArgs` defaults to `--workspace`). A `--bin`
+  # on the checks would restrict `cargo test` and silently skip the lib tests.
   mkToolkitBuildArgs =
     {
       src,
       depsSrc,
+      extraCargoArgs ? "",
     }:
     {
       inherit src depsSrc rev;
       prependPackageName = false;
+      cargoExtraArgs = extraCargoArgs;
       cargoToml = ../Cargo.toml;
     };
 in
 {
   # Local builds
-  binary-gnosis_vpn-toolkit = builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+  binary-gnosis_vpn-update = builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
     src = sources.main;
     depsSrc = sources.deps;
+    extraCargoArgs = "--bin gnosis_vpn-update";
   });
 
-  binary-gnosis_vpn-toolkit-dev = builders.local.callPackage nixLib.mkRustPackage (
+  binary-gnosis_vpn-update-dev = builders.local.callPackage nixLib.mkRustPackage (
     (mkToolkitBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
     })
     // {
       CARGO_PROFILE = "dev";
@@ -162,18 +171,20 @@ in
   );
 
   # Cross-compiled — x86_64 Linux
-  binary-gnosis_vpn-toolkit-x86_64-linux = withX86_64LinuxStaticEnv (
+  binary-gnosis_vpn-update-x86_64-linux = withX86_64LinuxStaticEnv (
     builders.x86_64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
     })
   );
 
-  binary-gnosis_vpn-toolkit-x86_64-linux-dev = withX86_64LinuxStaticEnv (
+  binary-gnosis_vpn-update-x86_64-linux-dev = withX86_64LinuxStaticEnv (
     builders.x86_64-linux.callPackage nixLib.mkRustPackage (
       (mkToolkitBuildArgs {
         src = sources.main;
         depsSrc = sources.deps;
+        extraCargoArgs = "--bin gnosis_vpn-update";
       })
       // {
         CARGO_PROFILE = "dev";
@@ -182,18 +193,20 @@ in
   );
 
   # Cross-compiled — aarch64 Linux
-  binary-gnosis_vpn-toolkit-aarch64-linux = withAarch64LinuxStaticEnv (
+  binary-gnosis_vpn-update-aarch64-linux = withAarch64LinuxStaticEnv (
     builders.aarch64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
     })
   );
 
-  binary-gnosis_vpn-toolkit-aarch64-linux-dev = withAarch64LinuxStaticEnv (
+  binary-gnosis_vpn-update-aarch64-linux-dev = withAarch64LinuxStaticEnv (
     builders.aarch64-linux.callPackage nixLib.mkRustPackage (
       (mkToolkitBuildArgs {
         src = sources.main;
         depsSrc = sources.deps;
+        extraCargoArgs = "--bin gnosis_vpn-update";
       })
       // {
         CARGO_PROFILE = "dev";
@@ -245,18 +258,20 @@ in
 }
 // lib.optionalAttrs pkgs.stdenv.isDarwin {
   # macOS — aarch64 (only available on Darwin hosts)
-  binary-gnosis_vpn-toolkit-aarch64-darwin = withDarwinStaticFlags (
+  binary-gnosis_vpn-update-aarch64-darwin = withDarwinStaticFlags (
     builders.aarch64-darwin.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
     })
   );
 
-  binary-gnosis_vpn-toolkit-aarch64-darwin-dev = withDarwinStaticFlags (
+  binary-gnosis_vpn-update-aarch64-darwin-dev = withDarwinStaticFlags (
     builders.aarch64-darwin.callPackage nixLib.mkRustPackage (
       (mkToolkitBuildArgs {
         src = sources.main;
         depsSrc = sources.deps;
+        extraCargoArgs = "--bin gnosis_vpn-update";
       })
       // {
         CARGO_PROFILE = "dev";

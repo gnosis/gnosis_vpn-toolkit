@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use exitcode::{self, ExitCode};
 
-use gnosis_vpn_toolkit::cli::{self, Command, OutputFormat};
-use gnosis_vpn_toolkit::update::{self, CheckOutcome, EngineInput, UpdateStage, UpdateStatus};
-use gnosis_vpn_toolkit::{logging, output};
+use gnosis_vpn_update::cli::{self, Command, OutputFormat};
+use gnosis_vpn_update::update::{self, CheckOutcome, EngineInput, UpdateStage, UpdateStatus};
+use gnosis_vpn_update::{logging, output};
 
 // Avoid musl's default allocator due to degraded performance
 // https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance

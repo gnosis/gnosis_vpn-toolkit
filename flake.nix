@@ -130,20 +130,20 @@
 
           packages = {
             inherit (toolkitPackages)
-              binary-gnosis_vpn-toolkit
-              binary-gnosis_vpn-toolkit-dev
-              binary-gnosis_vpn-toolkit-x86_64-linux
-              binary-gnosis_vpn-toolkit-x86_64-linux-dev
-              binary-gnosis_vpn-toolkit-aarch64-linux
-              binary-gnosis_vpn-toolkit-aarch64-linux-dev
+              binary-gnosis_vpn-update
+              binary-gnosis_vpn-update-dev
+              binary-gnosis_vpn-update-x86_64-linux
+              binary-gnosis_vpn-update-x86_64-linux-dev
+              binary-gnosis_vpn-update-aarch64-linux
+              binary-gnosis_vpn-update-aarch64-linux-dev
               ;
             inherit pre-commit-check;
-            default = toolkitPackages.binary-gnosis_vpn-toolkit;
+            default = toolkitPackages.binary-gnosis_vpn-update;
           }
           // lib.optionalAttrs pkgs.stdenv.isDarwin {
             inherit (toolkitPackages)
-              binary-gnosis_vpn-toolkit-aarch64-darwin
-              binary-gnosis_vpn-toolkit-aarch64-darwin-dev
+              binary-gnosis_vpn-update-aarch64-darwin
+              binary-gnosis_vpn-update-aarch64-darwin-dev
               ;
           };
 

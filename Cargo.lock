@@ -539,7 +539,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "gnosis_vpn-toolkit"
+name = "gnosis_vpn-update"
 version = "0.1.0"
 dependencies = [
  "anyhow",

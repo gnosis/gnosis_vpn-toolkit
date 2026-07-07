@@ -1,14 +1,18 @@
 # gnosis_vpn-toolkit
 
-Companion binary for the [Gnosis VPN client](https://github.com/gnosis/gnosis_vpn-client).
-It performs auxiliary tasks — starting with **self-update** — on behalf of
-`gnosis_vpn-app`, which spawns it as a subprocess and reads its **standard
-output**.
+A collection of companion binaries for the
+[Gnosis VPN client](https://github.com/gnosis/gnosis_vpn-client) that perform
+auxiliary tasks on behalf of `gnosis_vpn-app`, which spawns them as subprocesses
+and reads their **standard output**.
 
-Unlike the client, the toolkit runs **no socket server**: it communicates with
-`gnosis_vpn-app` purely over stdout. It does open a small read-only client
-connection to the running `gnosis_vpn` daemon socket to check whether the VPN
-is connected before updating (see the `--force` flag to bypass).
+This is a virtual Cargo workspace: each tool is its own `gnosis_vpn-*` member
+crate. The first is **`gnosis_vpn-update`** — the self-updater — documented
+below. Future tools are added as sibling member crates.
+
+Unlike the client, these tools run **no socket server**: they communicate with
+`gnosis_vpn-app` purely over stdout. `gnosis_vpn-update` does open a small
+read-only client connection to the running `gnosis_vpn` daemon socket to check
+whether the VPN is connected before updating (see the `--force` flag to bypass).
 
 ## Output contract
 
@@ -20,7 +24,7 @@ is connected before updating (see the `--force` flag to bypass).
   - `check-update` prints a single result object (`UpToDate`, `Available`,
     `NoReleaseForChannel`, `VpnNotConnected`, `IntegrityError`, `Error`).
   - `version` prints `{"version": "…"}`.
-  The JSON uses serde's externally-tagged enum encoding.
+    The JSON uses serde's externally-tagged enum encoding.
 - **stderr** carries human logs / diagnostics (`RUST_LOG`, default `info`), and
   the human-readable output when `--output plain` is used.
 - **exit codes** follow `exitcode` conventions (`OK`, `NOPERM` for
@@ -31,13 +35,13 @@ is connected before updating (see the `--force` flag to bypass).
 
 ```console
 # Check for an update on the stable channel (needs the VPN connected, or --force)
-gnosis_vpn-toolkit check-update --channel stable --current-version 0.91.1
+gnosis_vpn-update check-update --channel stable --current-version 0.91.1
 
 # Install an update (must run as root; streams progress as NDJSON)
-sudo gnosis_vpn-toolkit update --channel stable --current-version 0.91.1
+sudo gnosis_vpn-update update --channel stable --current-version 0.91.1
 
-# Print the toolkit's own version
-gnosis_vpn-toolkit version
+# Print the binary's own version
+gnosis_vpn-update version
 ```
 
 Installing an update performs privileged work (`apt-get` on Linux,
@@ -53,16 +57,16 @@ otherwise:
 
 ```console
 nix develop            # dev shell with the rust toolchain + tooling
-cargo build            # or: nix build .#binary-gnosis_vpn-toolkit
-cargo test
+cargo build            # builds the whole workspace; or: nix build .#binary-gnosis_vpn-update
+cargo test             # runs the workspace test suite
 nix flake check -L     # clippy + tests + audit + licenses
 ```
 
 Cross-compiled static Linux binaries:
 
 ```console
-nix build .#binary-gnosis_vpn-toolkit-x86_64-linux
-nix build .#binary-gnosis_vpn-toolkit-aarch64-linux
+nix build .#binary-gnosis_vpn-update-x86_64-linux
+nix build .#binary-gnosis_vpn-update-aarch64-linux
 ```
 
 ## License

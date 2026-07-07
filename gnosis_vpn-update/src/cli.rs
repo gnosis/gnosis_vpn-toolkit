@@ -33,7 +33,7 @@ impl From<ChannelArg> for Channel {
 /// Structured events are written to stdout (see --output); diagnostics go to
 /// stderr. Designed to be spawned by gnosis_vpn-app and driven over stdout.
 #[derive(Debug, Parser)]
-#[command(name = "gnosis_vpn-toolkit", version, about, long_about = None)]
+#[command(name = "gnosis_vpn-update", version, about, long_about = None)]
 pub struct Cli {
     /// Output format for events emitted on stdout
     #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json, global = true)]

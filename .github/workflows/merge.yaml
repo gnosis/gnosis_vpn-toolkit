@@ -20,13 +20,13 @@ jobs:
         include:
           - architecture: x86_64-linux
             runner: depot-ubuntu-22.04-4 # Depot Ubuntu 22.04, 4 CPUs, 16 GB RAM
-            build_command: nix build -L .#binary-gnosis_vpn-toolkit-x86_64-linux
+            build_command: nix build -L .#binary-gnosis_vpn-update-x86_64-linux
           - architecture: aarch64-linux
             runner: depot-ubuntu-22.04-arm-4 # Depot Ubuntu 22.04 ARM, 4 CPUs, 16 GB RAM
-            build_command: nix build -L .#binary-gnosis_vpn-toolkit-aarch64-linux
+            build_command: nix build -L .#binary-gnosis_vpn-update-aarch64-linux
           - architecture: aarch64-darwin
             runner: depot-macos-15 # Depot Apple Silicon M2, 8 CPUs, 24 GB RAM, 400 GB SSD
-            build_command: nix build -L .#binary-gnosis_vpn-toolkit-aarch64-darwin
+            build_command: nix build -L .#binary-gnosis_vpn-update-aarch64-darwin
     uses: hoprnet/hopr-workflows/.github/workflows/build-binaries.yaml@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # build-binaries-v3
     permissions:
       contents: read
@@ -37,7 +37,7 @@ jobs:
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: gnosis-vpn-toolkit
       build_command: ${{ matrix.build_command }}
-      binary: gnosis_vpn-toolkit
+      binary: gnosis_vpn-update
       runner: ${{ matrix.runner }}
       timeout_minutes: 240
     secrets:
