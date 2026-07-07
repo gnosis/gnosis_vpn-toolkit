@@ -1,0 +1,33 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "schedule:earlyMondays"],
+  "pinDigests": true,
+  "prCreation": "immediate",
+  "semanticCommits": "enabled",
+  "rangeStrategy": "bump",
+  "minimumReleaseAge": "14 days",
+  "vulnerabilityAlerts": { "enabled": true },
+  "nix": { "enabled": true },
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions",
+      "commitMessageTopic": "GitHub Actions"
+    },
+    {
+      "matchManagers": ["nix"],
+      "groupName": "nix flake updates",
+      "pinDigests": false
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "groupName": "rust crates (patch)"
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["minor"],
+      "groupName": "rust crates (minor)"
+    }
+  ]
+}

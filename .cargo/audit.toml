@@ -1,0 +1,19 @@
+# Cargo audit configuration for gnosis_vpn-toolkit
+#
+# Vulnerabilities are exempted here because they are either:
+# - From transitive dependencies we cannot control
+# - Unmaintained crates with no viable alternatives
+# - Lack a fixed version
+
+[advisories]
+# Advisory IDs to ignore
+ignore = []
+
+# Treat unmaintained warnings as informational only (not errors)
+informational_warnings = ["unmaintained"]
+
+# Output configuration
+[output]
+deny      = []
+quiet     = false
+show_tree = true
