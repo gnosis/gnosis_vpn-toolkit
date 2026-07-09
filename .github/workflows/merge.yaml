@@ -18,12 +18,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - architecture: x86_64-linux
-            runner: depot-ubuntu-22.04-4 # Depot Ubuntu 22.04, 4 CPUs, 16 GB RAM
-            build_command: nix build -L .#binary-gnosis_vpn-update-x86_64-linux
-          - architecture: aarch64-linux
-            runner: depot-ubuntu-22.04-arm-4 # Depot Ubuntu 22.04 ARM, 4 CPUs, 16 GB RAM
-            build_command: nix build -L .#binary-gnosis_vpn-update-aarch64-linux
           - architecture: aarch64-darwin
             runner: depot-macos-15 # Depot Apple Silicon M2, 8 CPUs, 24 GB RAM, 400 GB SSD
             build_command: nix build -L .#binary-gnosis_vpn-update-aarch64-darwin

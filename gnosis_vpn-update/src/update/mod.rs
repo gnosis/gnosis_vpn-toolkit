@@ -6,28 +6,21 @@
 //! mpsc channel; the binary forwards each status to stdout as newline-delimited
 //! JSON (see [`crate::output`]) instead of over a socket.
 //!
-//! On Linux the engine delegates to apt (see the `apt` module); on macOS it downloads a
-//! signed `.pkg`, SHA-256-verifies it, and runs `installer(8)`.
+//! The engine downloads a signed `.pkg`, SHA-256-verifies it, and runs
+//! `installer(8)`. macOS only.
 
 pub mod paths;
 
-#[cfg(target_os = "linux")]
-mod apt;
-
 use std::cmp::Ordering;
 use std::path::PathBuf;
-#[cfg(not(target_os = "linux"))]
 use std::time::SystemTime;
 
 #[cfg(test)]
 use bytesize::ByteSize;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-#[cfg(not(target_os = "linux"))]
 use sha2::{Digest, Sha256};
-#[cfg(not(target_os = "linux"))]
 use tokio::fs::OpenOptions;
-#[cfg(not(target_os = "linux"))]
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
@@ -39,9 +32,6 @@ use crate::manifest::{self, Channel, ChannelRelease};
 /// should be installed on this host.
 #[derive(Debug, thiserror::Error)]
 pub enum GateError {
-    // Only constructed on the macOS engine path (`drive_engine`); on Linux the
-    // check flow reports `CheckOutcome::NoReleaseForChannel` directly instead.
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
     #[error("Channel {0} has no release in this manifest")]
     NoReleaseForChannel(Channel),
     #[error("Candidate {candidate} requires app {required} (have {current}); upgrade to an intermediate first")]
@@ -96,11 +86,9 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
 /// `allow_downgrade` is the explicit user override — without it,
 /// strictly-lower candidates are rejected.
 ///
-/// The manifest's `min_os_version` field is **not** consulted. On Linux the
-/// manifest carries Ubuntu-style values that don't compare meaningfully
-/// against Debian/Fedora versions, and the `.deb`/`.rpm` artifacts already
-/// declare their real package dependencies. On macOS the `.pkg` postinstall
-/// surfaces an OS-too-old failure if applicable.
+/// The manifest's `min_os_version` field is **not** consulted here: the macOS
+/// `.pkg` postinstall surfaces an OS-too-old failure at install time if
+/// applicable.
 pub fn ensure_installable(
     release: &ChannelRelease,
     current_app_version: &str,
@@ -149,22 +137,19 @@ impl std::fmt::Display for UpdateStage {
 }
 
 /// Streaming status emitted by the install engine. Deliberately coarse phase
-/// markers — no byte-level progress — so macOS and Linux emit an **identical**
-/// sequence and the app can render one UI for both. The engine streams
-/// `Checking → Downloading → Installing` then a terminal `Completed`/`Failed`.
+/// markers — no byte-level progress — so the app can render a simple, stable
+/// UI. The engine streams `Checking → Downloading → Installing` then a terminal
+/// `Completed`/`Failed`.
 ///
-/// There is intentionally no download byte counter: on Linux apt downloads
-/// opaquely, so a granular progress bar could never be shown there, and the two
-/// platforms are kept symmetric. Rich release info (target version, notes,
-/// size) is available from the separate `check-update` command
+/// There is intentionally no download byte counter. Rich release info (target
+/// version, notes, size) is available from the separate `check-update` command
 /// ([`CheckOutcome::Available`]), not from this stream. The download-finished
 /// moment is signalled by the arrival of `Installing`.
 ///
 /// Serialized to stdout as one JSON object per line.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum UpdateStatus {
-    /// Looking for an applicable update (manifest fetch on macOS, apt-source
-    /// channel config on Linux).
+    /// Looking for an applicable update (manifest fetch + integrity check).
     Checking,
     /// The update download has started.
     Downloading,
@@ -255,11 +240,6 @@ pub async fn check(
 }
 
 /// Engine input. Constructed by the binary before spawning the engine task.
-///
-/// On Linux only `channel`, `socket_path`, and `skip_vpn_check` are consumed
-/// (the rest drive the macOS download/verify/install path), so the unread
-/// fields are expected there.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct EngineInput {
     /// HTTPS client to use for manifest + artifact fetch.
@@ -285,37 +265,23 @@ pub struct EngineInput {
 /// Spawn the install engine task and return an `mpsc::Receiver` that yields
 /// each `UpdateStatus` until terminal, then closes.
 ///
-/// The engine emits the same coarse sequence on every platform:
-/// 1. `Checking` → resolve what to install (macOS: manifest fetch + integrity,
-///    SHA only for now, PGP TODO; Linux: apt-source channel config)
-/// 2. `Downloading` → the artifact download has started (macOS: `.pkg` fetch +
-///    silent SHA-256 verify; Linux: apt fetch)
-/// 3. `Installing` → download finished, platform installer running (macOS:
-///    `installer(8)`; Linux: `apt-get install --only-upgrade`)
+/// The engine emits this coarse sequence:
+/// 1. `Checking` → resolve what to install (manifest fetch + integrity; SHA
+///    only for now, PGP TODO)
+/// 2. `Downloading` → the `.pkg` download has started, followed by a silent
+///    SHA-256 verify
+/// 3. `Installing` → download finished, `installer(8)` running
 /// 4. terminal `Completed { new_version }`
 ///
 /// On any failure the engine emits `Failed { stage, error }` and stops. The
 /// `stage` may be finer-grained than the status stream (e.g. `Verify` on a
-/// macOS SHA mismatch, `Download` on a Linux `apt-get update` failure).
-///
-/// On Linux the engine delegates to apt — see the `apt` module. The `channel`,
-/// `socket_path`, and `skip_vpn_check` fields are honoured there.
-/// `download_dir`, `attempt_state_path`, `audit_log_path`, `allow_downgrade`,
-/// and `current_app_version` are macOS-only.
+/// SHA mismatch).
 pub fn install_engine(input: EngineInput) -> mpsc::Receiver<UpdateStatus> {
-    #[cfg(target_os = "linux")]
-    {
-        apt::install_engine(input.channel, input.socket_path, input.skip_vpn_check)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let (tx, rx) = mpsc::channel(32);
-        tokio::spawn(async move { run_engine(input, tx).await });
-        rx
-    }
+    let (tx, rx) = mpsc::channel(32);
+    tokio::spawn(async move { run_engine(input, tx).await });
+    rx
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn run_engine(input: EngineInput, tx: mpsc::Sender<UpdateStatus>) {
     let outcome = drive_engine(&input, &tx).await;
     let last = match outcome {
@@ -327,7 +293,6 @@ async fn run_engine(input: EngineInput, tx: mpsc::Sender<UpdateStatus>) {
     let _ = tx.send(last).await;
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> Result<String, (UpdateStage, String)> {
     let _ = tx.send(UpdateStatus::Checking).await;
 
@@ -358,34 +323,19 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
 
     // SHA-256 verify happens silently between download and install; a mismatch
     // surfaces as `Failed { stage: Verify }`. No dedicated status is emitted so
-    // the stream stays symmetric with the Linux (apt) path.
+    // the stream stays coarse.
     verify_sha256(&artifact_path, &release)
         .await
         .map_err(|e| (UpdateStage::Verify, e))?;
 
     let _ = tx.send(UpdateStatus::Installing).await;
 
-    // `install_platform` only exists on macOS (Linux updates go through `apt`
-    // and never reach this engine). On any other non-Linux target there is no
-    // installer to invoke, so fail the Install stage cleanly rather than
-    // failing to compile against a missing module.
-    #[cfg(target_os = "macos")]
-    {
-        install_platform::install(&artifact_path)
-            .await
-            .map_err(|e| (UpdateStage::Install, e))?;
-        Ok(release.version.clone())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err((
-            UpdateStage::Install,
-            "self-update is not supported on this platform".to_string(),
-        ))
-    }
+    install_platform::install(&artifact_path)
+        .await
+        .map_err(|e| (UpdateStage::Install, e))?;
+    Ok(release.version.clone())
 }
 
-#[cfg(not(target_os = "linux"))]
 #[derive(Debug, thiserror::Error)]
 enum DownloadError {
     #[error("http: {0}")]
@@ -404,7 +354,6 @@ enum DownloadError {
     InvalidFilename(String),
 }
 
-#[cfg(not(target_os = "linux"))]
 const FREE_SPACE_HEADROOM: u64 = 500 * 1024 * 1024; // plan: size + 500 MB headroom
 
 /// Derive a safe on-disk artifact filename from a download URL.
@@ -417,11 +366,6 @@ const FREE_SPACE_HEADROOM: u64 = 500 * 1024 * 1024; // plan: size + 500 MB headr
 /// later operates on the target. Returns `None` for any URL without such a
 /// segment so callers can treat it as a hard failure instead of guessing a
 /// fallback name.
-///
-/// (Gated to the targets that actually download — non-Linux — plus `test`, so
-/// it is compiled and exercised by the Linux test suite without tripping a
-/// dead-code lint on the Linux release build.)
-#[cfg(any(not(target_os = "linux"), test))]
 fn safe_artifact_filename(url: &url::Url) -> Option<String> {
     use std::path::{Component, Path};
 
@@ -440,7 +384,6 @@ fn safe_artifact_filename(url: &url::Url) -> Option<String> {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn download_artifact(input: &EngineInput, release: &ChannelRelease) -> Result<PathBuf, DownloadError> {
     // The privileged updater must never fetch the artifact over cleartext.
     // Manifest PGP verification is currently disabled, so an http:// URL would
@@ -512,7 +455,6 @@ async fn download_artifact(input: &EngineInput, release: &ChannelRelease) -> Res
     Ok(target)
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     // Stream the artifact through the hasher with a fixed buffer instead of
@@ -537,7 +479,6 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
 /// Best-effort free-space probe using `statvfs(3)` on Unix. Returns `None` if
 /// the call fails — callers should treat that as "skip the check" rather than
 /// blocking the install.
-#[cfg(not(target_os = "linux"))]
 fn free_bytes(path: &std::path::Path) -> Option<u64> {
     #[cfg(unix)]
     {
@@ -560,7 +501,6 @@ fn free_bytes(path: &std::path::Path) -> Option<u64> {
 
 /// Persisted so a crash mid-install can be recorded. Written on every terminal
 /// status when `attempt_state_path` is set.
-#[cfg(not(target_os = "linux"))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LastUpdateAttempt {
     pub timestamp: chrono::DateTime<chrono::Utc>,
@@ -569,7 +509,6 @@ pub struct LastUpdateAttempt {
     pub final_status: UpdateStatus,
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn persist_attempt(input: &EngineInput, last: &UpdateStatus) {
     let Some(path) = input.attempt_state_path.as_ref() else {
         return;
@@ -588,7 +527,6 @@ async fn persist_attempt(input: &EngineInput, last: &UpdateStatus) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
 async fn audit_log(input: &EngineInput, last: &UpdateStatus) {
     let Some(path) = input.audit_log_path.as_ref() else {
         return;
@@ -603,8 +541,7 @@ async fn audit_log(input: &EngineInput, last: &UpdateStatus) {
     }
 }
 
-/// Platform-specific install invocation. macOS only — Linux goes through
-/// the `apt` module and never calls this.
+/// The macOS install invocation (runs `installer(8)`).
 #[cfg(target_os = "macos")]
 pub(crate) mod install_platform {
     use std::path::Path;
@@ -689,8 +626,8 @@ mod tests {
 
     #[test]
     fn ensure_installable_ignores_min_os_version() {
-        // Linux: manifest says "22.04" but the host is "12" (Debian). No OS
-        // gate runs; `dpkg`/`rpm` catch real incompatibility at install time.
+        // The manifest's min_os_version is not gated here; the macOS `.pkg`
+        // postinstall catches real incompatibility at install time.
         let r = release("0.87.0", "0.80.0", "22.04");
         let ord = ensure_installable(&r, "0.86.0", false).unwrap();
         assert_eq!(ord, Ordering::Greater);

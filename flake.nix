@@ -49,8 +49,6 @@
         inputs.nix-lib.flakeModules.default
       ];
       systems = [
-        "x86_64-linux"
-        "aarch64-linux"
         "aarch64-darwin"
       ];
       perSystem =
@@ -82,7 +80,6 @@
               lib
               nixLib
               self
-              pkgs
               craneLib
               advisory-db
               ;
@@ -132,19 +129,11 @@
             inherit (toolkitPackages)
               binary-gnosis_vpn-update
               binary-gnosis_vpn-update-dev
-              binary-gnosis_vpn-update-x86_64-linux
-              binary-gnosis_vpn-update-x86_64-linux-dev
-              binary-gnosis_vpn-update-aarch64-linux
-              binary-gnosis_vpn-update-aarch64-linux-dev
-              ;
-            inherit pre-commit-check;
-            default = toolkitPackages.binary-gnosis_vpn-update;
-          }
-          // lib.optionalAttrs pkgs.stdenv.isDarwin {
-            inherit (toolkitPackages)
               binary-gnosis_vpn-update-aarch64-darwin
               binary-gnosis_vpn-update-aarch64-darwin-dev
               ;
+            inherit pre-commit-check;
+            default = toolkitPackages.binary-gnosis_vpn-update;
           };
 
           devShells.default = craneLib.devShell {

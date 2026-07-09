@@ -18,9 +18,8 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 
 - **stdout** carries the machine-readable protocol. With `--output json` (the
   default) each line is one JSON value (newline-delimited JSON / NDJSON):
-  - `update` streams `UpdateStatus` events (`Checking`, `Available`,
-    `Downloading`, `Verifying`, `Installing`, `RestartingService`,
-    `Completed`, `Failed`) until a terminal status.
+  - `update` streams `UpdateStatus` events (`Checking`, `Downloading`,
+    `Installing`, then a terminal `Completed` or `Failed`).
   - `check-update` prints a single result object (`UpToDate`, `Available`,
     `NoReleaseForChannel`, `VpnNotConnected`, `IntegrityError`, `Error`).
   - `version` prints `{"version": "…"}`.
@@ -44,15 +43,16 @@ sudo gnosis_vpn-update update --channel stable --current-version 0.91.1
 gnosis_vpn-update version
 ```
 
-Installing an update performs privileged work (`apt-get` on Linux,
-`installer(8)` on macOS) and therefore must be launched with root privileges.
-`gnosis_vpn-app` is responsible for elevating (pkexec/polkit on Linux,
-Authorization Services on macOS). `--current-version` is the currently-installed
-client version (the app sources it from the daemon's reported package version).
+Installing an update performs privileged work (`installer(8)`) and therefore
+must be launched with root privileges. `gnosis_vpn-app` is responsible for
+elevating (Authorization Services on macOS). `--current-version` is the
+currently-installed client version (the app sources it from the daemon's
+reported package version).
 
 ## Development
 
-This repo uses Nix. With `direnv`, `cd` into the repo to enter the dev shell;
+The toolkit targets **macOS** (Apple Silicon); build and test on macOS. This
+repo uses Nix. With `direnv`, `cd` into the repo to enter the dev shell;
 otherwise:
 
 ```console
@@ -62,11 +62,10 @@ cargo test             # runs the workspace test suite
 nix flake check -L     # clippy + tests + audit + licenses
 ```
 
-Cross-compiled static Linux binaries:
+The signed release binary is built with:
 
 ```console
-nix build .#binary-gnosis_vpn-update-x86_64-linux
-nix build .#binary-gnosis_vpn-update-aarch64-linux
+nix build .#binary-gnosis_vpn-update-aarch64-darwin
 ```
 
 ## License

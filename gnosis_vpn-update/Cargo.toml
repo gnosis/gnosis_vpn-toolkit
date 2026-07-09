@@ -20,25 +20,17 @@ bytesize           = { workspace = true }
 chrono             = { workspace = true }
 clap               = { workspace = true }
 exitcode           = { workspace = true }
+libc               = { workspace = true }
 reqwest            = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
 serde_with         = { workspace = true }
+sha2               = { workspace = true }
 thiserror          = { workspace = true }
 tokio              = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 url                = { workspace = true }
-
-# Avoid musl's default allocator due to degraded performance.
-[target.'cfg(target_os = "linux")'.dependencies]
-tikv-jemallocator = { workspace = true }
-
-# sha2 (artifact verification) and libc (statvfs free-space probe) are only used
-# on the macOS install path; on Linux the update goes through apt.
-[target.'cfg(not(target_os = "linux"))'.dependencies]
-libc = { workspace = true }
-sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -35,12 +35,6 @@ impl fmt::Display for Hash {
 // const PUBLIC_KEY: &str = include_str!("../gnosisvpn-public-key.asc");
 const MANIFEST_BASE_URL: &str = "https://download.gnosisvpn.io/manifests/";
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const MANIFEST_FILENAME: &str = "linux-amd64.json";
-
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const MANIFEST_FILENAME: &str = "linux-arm64.json";
-
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
 
@@ -185,16 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_linux_amd64() {
-        verify_fixture("linux-amd64.json");
-    }
-
-    #[test]
-    fn verify_linux_arm64() {
-        verify_fixture("linux-arm64.json");
-    }
-
-    #[test]
     fn verify_macos_arm64() {
         verify_fixture("macos-arm64.json");
     }
@@ -203,8 +187,8 @@ mod tests {
     #[test]
     #[ignore]
     fn rejects_tampered_manifest() {
-        let mut manifest_bytes = fixture("linux-amd64.json");
-        let sig_bytes = fixture("linux-amd64.json.asc");
+        let mut manifest_bytes = fixture("macos-arm64.json");
+        let sig_bytes = fixture("macos-arm64.json.asc");
         // flip a byte in the middle to simulate tampering
         let mid = manifest_bytes.len() / 2;
         manifest_bytes[mid] ^= 0xff;
@@ -213,26 +197,19 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_all_fixtures() {
-        for name in ["linux-amd64.json", "linux-arm64.json", "macos-arm64.json"] {
-            let bytes = fixture(name);
-            let manifest: Manifest =
-                serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
-            let stable = manifest.channels.stable.expect("stable channel");
-            assert_eq!(stable.sha256.0.len(), 32);
-            assert!(stable.size_bytes.as_u64() > 0);
-            assert!(stable.published_at.timestamp() > 0);
-            assert!(!stable.min_os_version.is_empty());
-        }
+    fn deserializes_macos_fixture() {
+        let name = "macos-arm64.json";
+        let bytes = fixture(name);
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
+        let stable = manifest.channels.stable.expect("stable channel");
+        assert_eq!(stable.sha256.0.len(), 32);
+        assert!(stable.size_bytes.as_u64() > 0);
+        assert!(stable.published_at.timestamp() > 0);
+        assert!(!stable.min_os_version.is_empty());
     }
 
-    // TODO: re-enable once PGP verification is restored in verify_and_parse.
-    #[test]
-    #[ignore]
-    fn rejects_mismatched_signature() {
-        let manifest_bytes = fixture("linux-amd64.json");
-        let wrong_sig = fixture("linux-arm64.json.asc");
-        let result = verify_and_parse(&manifest_bytes, &wrong_sig);
-        assert!(result.is_err(), "wrong signature should fail verification");
-    }
+    // TODO: re-add a mismatched-signature test once PGP verification is restored
+    // in verify_and_parse; it needs a second signed macOS fixture to use as the
+    // wrong signature.
 }
