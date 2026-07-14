@@ -168,8 +168,23 @@ in
   };
 
   # macOS — aarch64
+  #
+  # Use `builders.local` rather than `builders.aarch64-darwin`. The flake only
+  # declares `systems = [ "aarch64-darwin" ]`, so these outputs are always
+  # evaluated and built on a native aarch64-darwin host — `builders.local` is
+  # therefore already the aarch64-darwin builder, and a native darwin build is
+  # behaviorally identical to nix-lib's `aarch64-darwin` builder (isCross
+  # collapses to false, crossSystem to localSystem).
+  #
+  # This also avoids a bug in nix-lib's `mkAarch64DarwinBuilder`
+  # (lib/rust-builders.nix): it computes `isNative` by passing an un-elaborated
+  # `lib.systems.examples.aarch64-darwin` to `lib.systems.equals`, which reads
+  # `._withoutFunctions` on both operands and throws `attribute
+  # '_withoutFunctions' missing` on current nixpkgs. The pinned nix-lib commit
+  # is the latest on its default branch, so there is no fixed release to bump
+  # to yet.
   binary-gnosis_vpn-update-aarch64-darwin = withDarwinStaticFlags (
-    builders.aarch64-darwin.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+    builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
       depsSrc = sources.deps;
       extraCargoArgs = "--bin gnosis_vpn-update";
@@ -177,7 +192,7 @@ in
   );
 
   binary-gnosis_vpn-update-aarch64-darwin-dev = withDarwinStaticFlags (
-    builders.aarch64-darwin.callPackage nixLib.mkRustPackage (
+    builders.local.callPackage nixLib.mkRustPackage (
       (mkToolkitBuildArgs {
         src = sources.main;
         depsSrc = sources.deps;
