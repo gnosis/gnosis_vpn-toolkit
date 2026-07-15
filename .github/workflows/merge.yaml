@@ -31,7 +31,7 @@ jobs:
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: gnosis-vpn-toolkit
       build_command: ${{ matrix.build_command }}
-      binary: gnosis_vpn-update
+      binary: gnosis_vpn-toolkit
       gcp_workload_identity_provider: projects/656686060169/locations/global/workloadIdentityPools/gnosisvpn-gh-pool/providers/github-provider
       gcp_service_account: download-gnosisvpn-gh-sa@gnosisvpn-production.iam.gserviceaccount.com
       runner: ${{ matrix.runner }}

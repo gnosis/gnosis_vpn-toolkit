@@ -36,7 +36,7 @@ jobs:
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: gnosis-vpn-toolkit
       build_command: ${{ matrix.build_command }}
-      binary: gnosis_vpn-update
+      binary: gnosis_vpn-toolkit
       gcp_workload_identity_provider: projects/656686060169/locations/global/workloadIdentityPools/gnosisvpn-gh-pool/providers/github-provider
       gcp_service_account: download-gnosisvpn-gh-sa@gnosisvpn-production.iam.gserviceaccount.com
       runner: ${{ matrix.runner }}
@@ -70,6 +70,6 @@ jobs:
           zulip_channel: GnosisVPN
           zulip_topic: Releases
           gcp_service_account: download-gnosisvpn-gh-sa@gnosisvpn-production.iam.gserviceaccount.com
-          gcp_artifact_package: gnosis_vpn-update
+          gcp_artifact_package: gnosis_vpn-toolkit
           github_app_private_key: ${{ secrets.GH_APP_GNOSISVPN_BOT_PRIVATE_KEY }}
           github_app_client_id: ${{ secrets.GH_APP_GNOSISVPN_CLIENT_ID }}
