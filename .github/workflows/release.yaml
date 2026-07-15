@@ -52,6 +52,7 @@ jobs:
     runs-on: depot-ubuntu-22.04-4
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Release version
         uses: hoprnet/hopr-workflows/actions/release-version@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # release-version-v5
