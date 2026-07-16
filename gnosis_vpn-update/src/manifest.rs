@@ -200,8 +200,7 @@ mod tests {
     fn deserializes_macos_fixture() {
         let name = "macos-arm64.json";
         let bytes = fixture(name);
-        let manifest: Manifest =
-            serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
+        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
         let stable = manifest.channels.stable.expect("stable channel");
         assert_eq!(stable.sha256.0.len(), 32);
         assert!(stable.size_bytes.as_u64() > 0);

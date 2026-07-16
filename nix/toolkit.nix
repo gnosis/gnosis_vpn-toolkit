@@ -169,12 +169,14 @@ in
 
   # macOS — aarch64
   #
-  # Use `builders.local` rather than `builders.aarch64-darwin`. The flake only
-  # declares `systems = [ "aarch64-darwin" ]`, so these outputs are always
-  # evaluated and built on a native aarch64-darwin host — `builders.local` is
-  # therefore already the aarch64-darwin builder, and a native darwin build is
-  # behaviorally identical to nix-lib's `aarch64-darwin` builder (isCross
-  # collapses to false, crossSystem to localSystem).
+  # Use `builders.local` rather than `builders.aarch64-darwin`. The flake
+  # exposes package outputs only for the aarch64-darwin system (flake.nix
+  # guards `packages`/`checks` with `optionalAttrs`; the linux system exists
+  # solely for a devshell), so these outputs are always evaluated and built on
+  # a native aarch64-darwin host — `builders.local` is therefore already the
+  # aarch64-darwin builder, and a native darwin build is behaviorally identical
+  # to nix-lib's `aarch64-darwin` builder (isCross collapses to false,
+  # crossSystem to localSystem).
   #
   # This also avoids a bug in nix-lib's `mkAarch64DarwinBuilder`
   # (lib/rust-builders.nix): it computes `isNative` by passing an un-elaborated

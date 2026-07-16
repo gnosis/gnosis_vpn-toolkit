@@ -48,8 +48,14 @@
       imports = [
         inputs.nix-lib.flakeModules.default
       ];
+      # The updater crate compiles only on aarch64-darwin (macOS-only feature
+      # set). x86_64-linux is declared anyway so the flake still provides a
+      # devshell and formatter there: CI's release job regenerates Cargo.lock
+      # via `nix develop` on an ubuntu runner, and the Linux dev box needs
+      # cargo/fmt tooling. Packages and checks stay darwin-only below.
       systems = [
         "aarch64-darwin"
+        "x86_64-linux"
       ];
       perSystem =
         {
@@ -65,6 +71,8 @@
             localSystem = system;
             overlays = [ (import rust-overlay) ];
           };
+
+          isDarwin = system == "aarch64-darwin";
 
           nixLib = nix-lib.lib.${system};
 
@@ -115,7 +123,7 @@
             };
           };
 
-          checks = {
+          checks = lib.optionalAttrs isDarwin {
             inherit (toolkitPackages)
               toolkit-clippy
               toolkit-docs
@@ -125,7 +133,7 @@
               ;
           };
 
-          packages = {
+          packages = lib.optionalAttrs isDarwin {
             inherit (toolkitPackages)
               binary-gnosis_vpn-update
               binary-gnosis_vpn-update-dev
@@ -136,19 +144,36 @@
             default = toolkitPackages.binary-gnosis_vpn-update;
           };
 
-          devShells.default = craneLib.devShell {
-            inherit pre-commit-check;
-            checks = self.checks.${system};
+          devShells.default =
+            if isDarwin then
+              craneLib.devShell {
+                inherit pre-commit-check;
+                checks = self.checks.${system};
 
-            packages = [
-              pkgs.cargo-machete
-              pkgs.cargo-shear
-              pkgs.just
-              pkgs.rust-analyzer
-            ];
+                packages = [
+                  pkgs.cargo-machete
+                  pkgs.cargo-shear
+                  pkgs.just
+                  pkgs.rust-analyzer
+                ];
 
-            VERGEN_GIT_SHA = toString (self.shortRev or self.dirtyShortRev or "unknown");
-          };
+                VERGEN_GIT_SHA = toString (self.shortRev or self.dirtyShortRev or "unknown");
+              }
+            else
+              # Slim shell for non-darwin hosts: enough cargo tooling to
+              # maintain Cargo.{toml,lock} (CI's bump-version step runs
+              # `nix develop --command cargo metadata … | jq … | cargo update`)
+              # without pulling in the darwin-only crate builds or the
+              # pre-commit check.
+              pkgs.mkShell {
+                packages = [
+                  (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)
+                  pkgs.cargo-machete
+                  pkgs.cargo-shear
+                  pkgs.jq
+                  pkgs.just
+                ];
+              };
 
         };
       flake = { };
