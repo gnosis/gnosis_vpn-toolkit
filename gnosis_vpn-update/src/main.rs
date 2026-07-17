@@ -40,19 +40,25 @@ fn print_version(format: OutputFormat) {
     }
 }
 
+/// The installed client version, read from the version file the installer
+/// writes (not caller-supplied — see `update::paths::installed_version_path`).
+fn installed_version() -> Result<String, String> {
+    update::read_installed_version(&update::paths::installed_version_path())
+}
+
 async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
-    let outcome = match build_client() {
-        Ok(client) => {
+    let outcome = match (installed_version(), build_client()) {
+        (Ok(current_version), Ok(client)) => {
             update::check(
                 &client,
                 args.channel.into(),
-                &args.current_version,
+                &current_version,
                 &args.socket_path,
                 args.force,
             )
             .await
         }
-        Err(e) => CheckOutcome::Error(e),
+        (Err(e), _) | (_, Err(e)) => CheckOutcome::Error(e),
     };
 
     match format {
@@ -63,8 +69,8 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
 }
 
 async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
-    let client = match build_client() {
-        Ok(c) => c,
+    let (current_app_version, client) = match installed_version().and_then(|v| build_client().map(|c| (v, c))) {
+        Ok(pair) => pair,
         Err(e) => {
             let status = UpdateStatus::Failed {
                 stage: UpdateStage::Check,
@@ -79,7 +85,7 @@ async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
         client,
         channel: args.channel.into(),
         allow_downgrade: args.allow_downgrade,
-        current_app_version: args.current_version,
+        current_app_version,
         download_dir: update::paths::download_dir(),
         attempt_state_path: Some(update::paths::attempt_state_path()),
         audit_log_path: Some(update::paths::audit_log_path()),

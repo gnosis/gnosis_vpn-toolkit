@@ -65,10 +65,6 @@ pub struct UpdateArgs {
     #[arg(short = 'c', long, value_enum, default_value_t = ChannelArg::Stable)]
     pub channel: ChannelArg,
 
-    /// Currently-installed client version (gates already-installed / downgrade)
-    #[arg(long)]
-    pub current_version: String,
-
     /// Permit installing an older release than the current one
     #[arg(long)]
     pub allow_downgrade: bool,
@@ -87,10 +83,6 @@ pub struct CheckArgs {
     /// Release channel to check
     #[arg(short = 'c', long, value_enum, default_value_t = ChannelArg::Stable)]
     pub channel: ChannelArg,
-
-    /// Currently-installed client version (compared against the manifest)
-    #[arg(long)]
-    pub current_version: String,
 
     /// Bypass the VPN-connected check (insecure)
     #[arg(short = 'f', long)]

@@ -34,10 +34,10 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 
 ```console
 # Check for an update on the stable channel (needs the VPN connected, or --force)
-gnosis_vpn-update check-update --channel stable --current-version 0.91.1
+gnosis_vpn-update check-update --channel stable
 
 # Install an update (must run as root; streams progress as NDJSON)
-sudo gnosis_vpn-update update --channel stable --current-version 0.91.1
+sudo gnosis_vpn-update update --channel stable
 
 # Print the binary's own version
 gnosis_vpn-update version
@@ -45,9 +45,13 @@ gnosis_vpn-update version
 
 Installing an update performs privileged work (`installer(8)`) and therefore
 must be launched with root privileges. `gnosis_vpn-app` is responsible for
-elevating (Authorization Services on macOS). `--current-version` is the
-currently-installed client version (the app sources it from the daemon's
-reported package version).
+elevating (Authorization Services on macOS). The currently-installed client
+version is read from `/etc/gnosisvpn/version.txt`, the file the client
+installer writes; if it is missing or empty both commands fail. The installed
+channel is inferred from that version string (snapshot builds carry `+build.…`
+metadata). Requesting the *other* channel is always offered/installed —
+switching stable ⇄ snapshot skips the newer-version gate, which only applies
+within the same channel.
 
 ## Development
 

@@ -46,6 +46,20 @@ pub enum GateError {
     AlreadyInstalled { candidate: String },
 }
 
+/// Read the currently-installed client version from the version file the
+/// installer writes (see [`paths::installed_version_path`]). Surrounding
+/// whitespace/newline is trimmed; a missing or empty file is an error — the
+/// updater cannot gate already-installed/downgrade without it.
+pub fn read_installed_version(path: &std::path::Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read installed version from {}: {e}", path.display()))?;
+    let version = raw.trim();
+    if version.is_empty() {
+        return Err(format!("installed version file {} is empty", path.display()));
+    }
+    Ok(version.to_string())
+}
+
 /// Componentwise compare for version-like strings.
 ///
 /// Splits on `.`, `-`, and `+`, parses each component as an integer (treating
@@ -79,12 +93,29 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
+/// Infer which channel a version string was published on. Snapshot builds are
+/// date-based and carry `+build.…` metadata; stable releases are plain
+/// semver. Mirrors the client installer's channel detection.
+pub fn channel_of_version(version: &str) -> Channel {
+    if version.contains('+') {
+        Channel::Snapshot
+    } else {
+        Channel::Stable
+    }
+}
+
 /// Validate a candidate release against the currently installed app version.
 ///
-/// `current_app_version` is supplied by the caller (the app passes it via
-/// `--current-version`, sourced from the daemon's reported package version).
+/// `current_app_version` is read from the installer-written version file
+/// (see [`read_installed_version`]).
 /// `allow_downgrade` is the explicit user override — without it,
 /// strictly-lower candidates are rejected.
+///
+/// A cross-channel switch (stable ⇄ snapshot, detected by comparing
+/// `target_channel` against [`channel_of_version`] of the installed version)
+/// is always permitted: the two channels use incomparable version schemes
+/// (semver vs date+build), so the min-app / already-installed / downgrade
+/// gates only apply within a channel.
 ///
 /// The manifest's `min_os_version` field is **not** consulted here: the macOS
 /// `.pkg` postinstall surfaces an OS-too-old failure at install time if
@@ -92,8 +123,14 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
 pub fn ensure_installable(
     release: &ChannelRelease,
     current_app_version: &str,
+    target_channel: Channel,
     allow_downgrade: bool,
 ) -> Result<Ordering, GateError> {
+    let ordering = compare_components(&release.version, current_app_version);
+    if channel_of_version(current_app_version) != target_channel {
+        return Ok(ordering);
+    }
+
     if compare_components(current_app_version, &release.min_app_version) == Ordering::Less {
         return Err(GateError::AppTooOld {
             current: current_app_version.to_string(),
@@ -102,7 +139,6 @@ pub fn ensure_installable(
         });
     }
 
-    let ordering = compare_components(&release.version, current_app_version);
     match ordering {
         Ordering::Equal => Err(GateError::AlreadyInstalled {
             candidate: release.version.clone(),
@@ -227,7 +263,7 @@ pub async fn check(
         return CheckOutcome::NoReleaseForChannel(channel);
     };
 
-    match ensure_installable(&release, current_version, false) {
+    match ensure_installable(&release, current_version, channel, false) {
         Ok(_) => CheckOutcome::Available {
             current: current_version.to_string(),
             release: Box::new(release),
@@ -248,7 +284,7 @@ pub struct EngineInput {
     pub channel: Channel,
     /// Whether to permit installing an older release.
     pub allow_downgrade: bool,
-    /// Currently-installed app version (from `--current-version`).
+    /// Currently-installed app version (from the installer's version file).
     pub current_app_version: String,
     /// Root-owned directory where the artifact is downloaded.
     pub download_dir: PathBuf,
@@ -312,7 +348,7 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
         )
     })?;
 
-    ensure_installable(&release, &input.current_app_version, input.allow_downgrade)
+    ensure_installable(&release, &input.current_app_version, input.channel, input.allow_downgrade)
         .map_err(|e| (UpdateStage::Check, e.to_string()))?;
 
     let _ = tx.send(UpdateStatus::Downloading).await;
@@ -593,6 +629,21 @@ mod tests {
     }
 
     #[test]
+    fn read_installed_version_trims_and_rejects_missing_or_empty() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("gnosis_vpn-update-test-version-{}.txt", std::process::id()));
+
+        std::fs::write(&path, "0.91.1\n").unwrap();
+        assert_eq!(read_installed_version(&path).unwrap(), "0.91.1");
+
+        std::fs::write(&path, "  \n").unwrap();
+        assert!(read_installed_version(&path).unwrap_err().contains("empty"));
+
+        std::fs::remove_file(&path).unwrap();
+        assert!(read_installed_version(&path).unwrap_err().contains("cannot read"));
+    }
+
+    #[test]
     fn compare_components_handles_app_and_snapshot_versions() {
         assert_eq!(compare_components("0.86.1", "0.86.0"), Ordering::Greater);
         assert_eq!(compare_components("0.86.0", "0.86.0"), Ordering::Equal);
@@ -609,18 +660,48 @@ mod tests {
     }
 
     #[test]
+    fn channel_of_version_detects_snapshot_build_metadata() {
+        assert_eq!(channel_of_version("0.91.1"), Channel::Stable);
+        assert_eq!(channel_of_version("2026.06.06+build.000005"), Channel::Snapshot);
+    }
+
+    #[test]
+    fn ensure_installable_skips_version_gates_across_channels() {
+        // On snapshot, switching to stable is always allowed — even to a
+        // release that would compare as a downgrade or already-installed.
+        let r = release("0.85.0", "0.80.0", "0.0");
+        assert!(ensure_installable(&r, "2026.06.06+build.000005", Channel::Stable, false).is_ok());
+
+        // On stable, switching to snapshot is likewise ungated, including the
+        // min-app gate (its version scheme is incomparable across channels).
+        let r = release("2026.06.06+build.000005", "2026.01.01+build.000001", "0.0");
+        assert!(ensure_installable(&r, "0.86.0", Channel::Snapshot, false).is_ok());
+    }
+
+    #[test]
+    fn ensure_installable_gates_within_snapshot_channel() {
+        let r = release("2026.06.06+build.000005", "0.0", "0.0");
+        let err = ensure_installable(&r, "2026.06.06+build.000005", Channel::Snapshot, false).unwrap_err();
+        assert!(matches!(err, GateError::AlreadyInstalled { .. }));
+        let err = ensure_installable(&r, "2026.07.01+build.000001", Channel::Snapshot, false).unwrap_err();
+        assert!(matches!(err, GateError::Downgrade { .. }));
+        let ord = ensure_installable(&r, "2026.05.01+build.000009", Channel::Snapshot, false).unwrap();
+        assert_eq!(ord, Ordering::Greater);
+    }
+
+    #[test]
     fn ensure_installable_rejects_downgrade_unless_allowed() {
         let r = release("0.85.0", "0.80.0", "0.0");
-        let err = ensure_installable(&r, "0.86.0", false).unwrap_err();
+        let err = ensure_installable(&r, "0.86.0", Channel::Stable, false).unwrap_err();
         assert!(matches!(err, GateError::Downgrade { .. }));
-        let ord = ensure_installable(&r, "0.86.0", true).unwrap();
+        let ord = ensure_installable(&r, "0.86.0", Channel::Stable, true).unwrap();
         assert_eq!(ord, Ordering::Less);
     }
 
     #[test]
     fn ensure_installable_rejects_when_app_too_old() {
         let r = release("1.0.0", "0.90.0", "0.0");
-        let err = ensure_installable(&r, "0.86.0", false).unwrap_err();
+        let err = ensure_installable(&r, "0.86.0", Channel::Stable, false).unwrap_err();
         assert!(matches!(err, GateError::AppTooOld { .. }));
     }
 
@@ -629,21 +710,21 @@ mod tests {
         // The manifest's min_os_version is not gated here; the macOS `.pkg`
         // postinstall catches real incompatibility at install time.
         let r = release("0.87.0", "0.80.0", "22.04");
-        let ord = ensure_installable(&r, "0.86.0", false).unwrap();
+        let ord = ensure_installable(&r, "0.86.0", Channel::Stable, false).unwrap();
         assert_eq!(ord, Ordering::Greater);
     }
 
     #[test]
     fn ensure_installable_rejects_same_version() {
         let r = release("0.86.0", "0.80.0", "0.0");
-        let err = ensure_installable(&r, "0.86.0", false).unwrap_err();
+        let err = ensure_installable(&r, "0.86.0", Channel::Stable, false).unwrap_err();
         assert!(matches!(err, GateError::AlreadyInstalled { .. }));
     }
 
     #[test]
     fn ensure_installable_accepts_upgrade() {
         let r = release("0.87.0", "0.80.0", "0.0");
-        let ord = ensure_installable(&r, "0.86.0", false).unwrap();
+        let ord = ensure_installable(&r, "0.86.0", Channel::Stable, false).unwrap();
         assert_eq!(ord, Ordering::Greater);
     }
 
