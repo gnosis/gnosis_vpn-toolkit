@@ -33,10 +33,14 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 ## Usage
 
 ```console
-# Check for an update on the stable channel (needs the VPN connected, or --force)
-gnosis_vpn-update check-update --channel stable
+# Check for an update on the installed version's channel (needs the VPN
+# connected, or --force)
+gnosis_vpn-update check-update
 
 # Install an update (must run as root; streams progress as NDJSON)
+sudo gnosis_vpn-update update
+
+# Switch channels explicitly
 sudo gnosis_vpn-update update --channel stable
 
 # Print the binary's own version
@@ -48,10 +52,20 @@ must be launched with root privileges. `gnosis_vpn-app` is responsible for
 elevating (Authorization Services on macOS). The currently-installed client
 version is read from `/etc/gnosisvpn/version.txt`, the file the client
 installer writes; if it is missing or empty both commands fail. The installed
-channel is inferred from that version string (snapshot builds carry `+build.…`
-metadata). Requesting the *other* channel is always offered/installed —
-switching stable ⇄ snapshot skips the newer-version gate, which only applies
-within the same channel.
+channel is inferred from that version string (a plain dotted-numeric version is
+a stable release; anything carrying build/pr/commit metadata — with `+` or its
+registry-slugged `-` form — is a snapshot-line build) and is the default when
+`--channel` is omitted — a snapshot install stays on snapshot, a stable install
+stays on stable. Requesting the *other*
+channel explicitly is always offered/installed — switching stable ⇄ snapshot
+skips the newer-version gate, which only applies within the same channel.
+
+Installer choices made at original install time (HOPR network jura/rotsee, log
+level) are preserved across updates: the updater detects the installed
+selection (from the `/etc/gnosisvpn/config.toml` symlink target, falling back
+to the choice files under `/Library/Logs/GnosisVPN/installer/`) and pins it via
+`installer -applyChoiceChangesXML`, so a CLI-driven update never flips a rotsee
+install back to the package default (jura).
 
 ## Development
 

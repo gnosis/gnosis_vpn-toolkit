@@ -9,6 +9,7 @@
 //! The engine downloads a signed `.pkg`, SHA-256-verifies it, and runs
 //! `installer(8)`. macOS only.
 
+pub mod choices;
 pub mod paths;
 
 use std::cmp::Ordering;
@@ -93,14 +94,23 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
-/// Infer which channel a version string was published on. Snapshot builds are
-/// date-based and carry `+build.…` metadata; stable releases are plain
-/// semver. Mirrors the client installer's channel detection.
+/// Infer which channel a version string was published on.
+///
+/// Stable releases are plain dotted-numeric semver taken from the repo's
+/// `package.json` ("0.81.2"). Every other build line (snapshot, pr, commit)
+/// carries extra metadata — `+build.…`, `+pr.…`, `+commit.…` — and parts of
+/// the publishing pipeline slug the `+` to `-` for registries that reject it
+/// ("0.81.2-pr.305"), so the metadata separator cannot be relied on. Treat
+/// anything that is not purely digits-and-dots as a snapshot-line build.
 pub fn channel_of_version(version: &str) -> Channel {
-    if version.contains('+') {
-        Channel::Snapshot
-    } else {
+    let is_plain_release = !version.is_empty()
+        && version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if is_plain_release {
         Channel::Stable
+    } else {
+        Channel::Snapshot
     }
 }
 
@@ -348,8 +358,13 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
         )
     })?;
 
-    ensure_installable(&release, &input.current_app_version, input.channel, input.allow_downgrade)
-        .map_err(|e| (UpdateStage::Check, e.to_string()))?;
+    ensure_installable(
+        &release,
+        &input.current_app_version,
+        input.channel,
+        input.allow_downgrade,
+    )
+    .map_err(|e| (UpdateStage::Check, e.to_string()))?;
 
     let _ = tx.send(UpdateStatus::Downloading).await;
 
@@ -366,7 +381,32 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
 
     let _ = tx.send(UpdateStatus::Installing).await;
 
-    install_platform::install(&artifact_path)
+    // Pin the installed network/loglevel selections so the pkg's default
+    // choices (jura, debug) don't flip them on a CLI install — see `choices`.
+    let installed_choices = choices::InstallerChoices::detect();
+    let choice_changes_path = match installed_choices.to_choice_changes_xml() {
+        Some(xml) => {
+            tracing::info!(
+                network = ?installed_choices.network,
+                loglevel = ?installed_choices.loglevel,
+                "pinning installer choices to the installed selection"
+            );
+            let path = input.download_dir.join("choice_changes.xml");
+            tokio::fs::write(&path, xml).await.map_err(|e| {
+                (
+                    UpdateStage::Install,
+                    format!("cannot write installer choice changes: {e}"),
+                )
+            })?;
+            Some(path)
+        }
+        None => {
+            tracing::warn!("no installed network/loglevel selection detected; installer defaults apply");
+            None
+        }
+    };
+
+    install_platform::install(&artifact_path, choice_changes_path.as_deref())
         .await
         .map_err(|e| (UpdateStage::Install, e))?;
     Ok(release.version.clone())
@@ -585,25 +625,42 @@ pub(crate) mod install_platform {
 
     /// Spawn `installer(8)` for the downloaded `.pkg` and wait for it to exit.
     ///
+    /// `choice_changes` is an optional choice-changes plist passed via
+    /// `-applyChoiceChangesXML` to pin the distribution package's choices
+    /// (network, log level) to the installed selection instead of the
+    /// package defaults (see [`super::choices`]).
+    ///
     /// The process should be ready to exit immediately after this returns: the
     /// postinstall reloads launchd which respawns the new binary.
-    pub async fn install(path: &Path) -> Result<(), String> {
-        let output = Command::new("installer")
-            .arg("-pkg")
-            .arg(path)
-            .arg("-target")
-            .arg("/")
+    pub async fn install(path: &Path, choice_changes: Option<&Path>) -> Result<(), String> {
+        let mut command = Command::new("installer");
+        command.arg("-pkg").arg(path).arg("-target").arg("/");
+        if let Some(changes) = choice_changes {
+            command.arg("-applyChoiceChangesXML").arg(changes);
+        }
+        let output = command
             .output()
             .await
             .map_err(|e| format!("installer spawn failed: {e}"))?;
         if output.status.success() {
             Ok(())
         } else {
-            Err(format!(
-                "installer exited with {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            ))
+            // installer(8) reports failures on stdout (and in
+            // /var/log/install.log); stderr is usually empty.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let detail = [stdout.trim(), stderr.trim()]
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let detail = if detail.is_empty() {
+                "no output; see /var/log/install.log".to_string()
+            } else {
+                detail
+            };
+            Err(format!("installer exited with {}: {detail}", output.status))
         }
     }
 }
@@ -663,6 +720,13 @@ mod tests {
     fn channel_of_version_detects_snapshot_build_metadata() {
         assert_eq!(channel_of_version("0.91.1"), Channel::Stable);
         assert_eq!(channel_of_version("2026.06.06+build.000005"), Channel::Snapshot);
+        // Registry-slugged forms replace `+` with `-`; still not stable.
+        assert_eq!(channel_of_version("2026.06.06-build.000005"), Channel::Snapshot);
+        assert_eq!(channel_of_version("0.81.2-pr.305"), Channel::Snapshot);
+        assert_eq!(channel_of_version("0.81.2+commit.abc1234"), Channel::Snapshot);
+        // Degenerate values must not be mistaken for a stable release.
+        assert_eq!(channel_of_version(""), Channel::Snapshot);
+        assert_eq!(channel_of_version("0..1"), Channel::Snapshot);
     }
 
     #[test]

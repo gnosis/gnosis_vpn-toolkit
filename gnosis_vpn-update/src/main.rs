@@ -49,14 +49,12 @@ fn installed_version() -> Result<String, String> {
 async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
     let outcome = match (installed_version(), build_client()) {
         (Ok(current_version), Ok(client)) => {
-            update::check(
-                &client,
-                args.channel.into(),
-                &current_version,
-                &args.socket_path,
-                args.force,
-            )
-            .await
+            // No --channel: stay on the channel the installed version came from.
+            let channel = match args.channel {
+                Some(c) => c.into(),
+                None => update::channel_of_version(&current_version),
+            };
+            update::check(&client, channel, &current_version, &args.socket_path, args.force).await
         }
         (Err(e), _) | (_, Err(e)) => CheckOutcome::Error(e),
     };
@@ -81,9 +79,15 @@ async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
         }
     };
 
+    // No --channel: stay on the channel the installed version came from.
+    let channel = match args.channel {
+        Some(c) => c.into(),
+        None => update::channel_of_version(&current_app_version),
+    };
+
     let input = EngineInput {
         client,
-        channel: args.channel.into(),
+        channel,
         allow_downgrade: args.allow_downgrade,
         current_app_version,
         download_dir: update::paths::download_dir(),

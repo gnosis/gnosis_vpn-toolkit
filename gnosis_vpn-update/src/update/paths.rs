@@ -27,3 +27,25 @@ pub fn audit_log_path() -> PathBuf {
 pub fn installed_version_path() -> PathBuf {
     PathBuf::from("/etc/gnosisvpn/version.txt")
 }
+
+/// Active client config, maintained by the installer as a symlink to the
+/// chosen network's config (e.g. `rotsee.toml`).
+pub fn config_symlink_path() -> PathBuf {
+    PathBuf::from("/etc/gnosisvpn/config.toml")
+}
+
+/// Directory where the GUI installer's choice packages record the user's
+/// selections as one-line shell fragments.
+fn installer_choice_dir() -> PathBuf {
+    PathBuf::from("/Library/Logs/GnosisVPN/installer")
+}
+
+/// Recorded HOPR network selection (`INSTALLER_CHOICE_NETWORK="…"`).
+pub fn network_choice_path() -> PathBuf {
+    installer_choice_dir().join("network_choice")
+}
+
+/// Recorded log level selection (`INSTALLER_CHOICE_LOGLEVEL="…"`).
+pub fn loglevel_choice_path() -> PathBuf {
+    installer_choice_dir().join("loglevel_choice")
+}

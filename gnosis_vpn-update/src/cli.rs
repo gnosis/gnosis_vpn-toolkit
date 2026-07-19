@@ -61,9 +61,10 @@ pub enum Command {
 
 #[derive(Debug, clap::Args)]
 pub struct UpdateArgs {
-    /// Release channel to install from
-    #[arg(short = 'c', long, value_enum, default_value_t = ChannelArg::Stable)]
-    pub channel: ChannelArg,
+    /// Release channel to install from; defaults to the channel of the
+    /// currently installed version
+    #[arg(short = 'c', long, value_enum)]
+    pub channel: Option<ChannelArg>,
 
     /// Permit installing an older release than the current one
     #[arg(long)]
@@ -80,9 +81,10 @@ pub struct UpdateArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct CheckArgs {
-    /// Release channel to check
-    #[arg(short = 'c', long, value_enum, default_value_t = ChannelArg::Stable)]
-    pub channel: ChannelArg,
+    /// Release channel to check; defaults to the channel of the currently
+    /// installed version
+    #[arg(short = 'c', long, value_enum)]
+    pub channel: Option<ChannelArg>,
 
     /// Bypass the VPN-connected check (insecure)
     #[arg(short = 'f', long)]
