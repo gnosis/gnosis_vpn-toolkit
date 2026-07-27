@@ -32,6 +32,9 @@ let
       root = ../.;
       extraFiles = [
         ../gnosis_vpn-update/gnosisvpn-public-key.asc
+        # Loader-window source: build.rs osacompiles it into the app-bundle
+        # zip that is `include_bytes!`-embedded into the binary.
+        ../gnosis_vpn-update/assets/update-loader.applescript
       ];
     };
     test = nixLib.mkTestSrc {
@@ -42,6 +45,9 @@ let
       # source has them (mkTestSrc only picks up `.rs`/`.toml` files by default).
       extraFiles = [
         ../gnosis_vpn-update/gnosisvpn-public-key.asc
+        # The (darwin) test build's build.rs osacompiles the loader app zip
+        # that the crate `include_bytes!`s.
+        ../gnosis_vpn-update/assets/update-loader.applescript
         ../gnosis_vpn-update/tests/fixtures/macos-arm64.json
         ../gnosis_vpn-update/tests/fixtures/macos-arm64.json.asc
       ];

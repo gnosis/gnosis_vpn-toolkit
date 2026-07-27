@@ -10,7 +10,11 @@
 //! `installer(8)`. macOS only.
 
 pub mod choices;
+#[cfg(target_os = "macos")]
+pub mod loader;
 pub mod paths;
+#[cfg(target_os = "macos")]
+pub mod self_update;
 
 use std::cmp::Ordering;
 use std::path::PathBuf;
@@ -330,16 +334,33 @@ pub fn install_engine(input: EngineInput) -> mpsc::Receiver<UpdateStatus> {
 
 async fn run_engine(input: EngineInput, tx: mpsc::Sender<UpdateStatus>) {
     let outcome = drive_engine(&input, &tx).await;
-    let last = match outcome {
-        Ok(version) => UpdateStatus::Completed { new_version: version },
-        Err((stage, error)) => UpdateStatus::Failed { stage, error },
+    let (last, updater_version) = match outcome {
+        Ok(outcome) => (
+            UpdateStatus::Completed {
+                new_version: outcome.version,
+            },
+            outcome.updater_version,
+        ),
+        Err((stage, error)) => (UpdateStatus::Failed { stage, error }, None),
     };
     persist_attempt(&input, &last).await;
-    audit_log(&input, &last).await;
+    audit_log(&input, &last, updater_version.as_deref()).await;
     let _ = tx.send(last).await;
 }
 
-async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> Result<String, (UpdateStage, String)> {
+/// Successful engine outcome: the installed release version, plus the new
+/// on-disk updater binary's own `version` output when the post-install
+/// self-update probe succeeded (see `self_update`) — recorded in the audit
+/// log as proof the updater replaced itself.
+struct EngineOutcome {
+    version: String,
+    updater_version: Option<String>,
+}
+
+async fn drive_engine(
+    input: &EngineInput,
+    tx: &mpsc::Sender<UpdateStatus>,
+) -> Result<EngineOutcome, (UpdateStage, String)> {
     let _ = tx.send(UpdateStatus::Checking).await;
 
     if !input.skip_vpn_check {
@@ -379,8 +400,36 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
         .await
         .map_err(|e| (UpdateStage::Verify, e))?;
 
+    // Show the loader window before announcing `Installing`. It must be
+    // dismissed on every path out of the install — success and failure alike —
+    // which is why the whole install phase lives in `run_install` and dismiss
+    // happens on its single exit point below.
+    #[cfg(target_os = "macos")]
+    let loader = loader::show().await;
+
     let _ = tx.send(UpdateStatus::Installing).await;
 
+    let install_result = run_install(input, &artifact_path).await;
+
+    #[cfg(target_os = "macos")]
+    loader::dismiss(loader).await;
+
+    let updater_version = install_result?;
+    Ok(EngineOutcome {
+        version: release.version.clone(),
+        updater_version,
+    })
+}
+
+/// The install phase, bracketed by loader show/dismiss in `drive_engine`:
+/// pin the installer choices, rename the running updater binary aside (see
+/// `self_update`), run `installer(8)`, then settle the self-update. Returns
+/// the new on-disk updater binary's `version` output when the install (and
+/// the self-update probe) succeeded.
+async fn run_install(
+    input: &EngineInput,
+    artifact_path: &std::path::Path,
+) -> Result<Option<String>, (UpdateStage, String)> {
     // Pin the installed network/loglevel selections so the pkg's default
     // choices (jura, debug) don't flip them on a CLI install — see `choices`.
     let installed_choices = choices::InstallerChoices::detect();
@@ -406,10 +455,20 @@ async fn drive_engine(input: &EngineInput, tx: &mpsc::Sender<UpdateStatus>) -> R
         }
     };
 
-    install_platform::install(&artifact_path, choice_changes_path.as_deref())
-        .await
-        .map_err(|e| (UpdateStage::Install, e))?;
-    Ok(release.version.clone())
+    // Rename the running binary aside so the pkg postinstall's `cp` of the new
+    // updater succeeds instead of silently failing on the running Mach-O.
+    #[cfg(target_os = "macos")]
+    let aside = self_update::rename_aside();
+
+    let install_result = install_platform::install(artifact_path, choice_changes_path.as_deref()).await;
+
+    #[cfg(target_os = "macos")]
+    let updater_version = self_update::finish(aside, install_result.is_ok()).await;
+    #[cfg(not(target_os = "macos"))]
+    let updater_version = None;
+
+    install_result.map_err(|e| (UpdateStage::Install, e))?;
+    Ok(updater_version)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -492,10 +551,10 @@ async fn download_artifact(input: &EngineInput, release: &ChannelRelease) -> Res
 
     let expected = release.size_bytes.as_u64();
     let need = expected + FREE_SPACE_HEADROOM;
-    if let Some(free) = free_bytes(&input.download_dir) {
-        if free < need {
-            return Err(DownloadError::InsufficientSpace { needed: need, free });
-        }
+    if let Some(free) = free_bytes(&input.download_dir)
+        && free < need
+    {
+        return Err(DownloadError::InsufficientSpace { needed: need, free });
     }
 
     let mut response = input
@@ -555,6 +614,11 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
 /// Best-effort free-space probe using `statvfs(3)` on Unix. Returns `None` if
 /// the call fails — callers should treat that as "skip the check" rather than
 /// blocking the install.
+// statvfs field widths differ per platform (on macOS `f_bavail` is u32 and
+// `f_frsize` u64, elsewhere both may already be u64), so one of the two casts
+// below is always "unnecessary" for the current target — keep both for
+// portability and overflow-free multiplication.
+#[allow(clippy::unnecessary_cast)]
 fn free_bytes(path: &std::path::Path) -> Option<u64> {
     #[cfg(unix)]
     {
@@ -603,7 +667,11 @@ async fn persist_attempt(input: &EngineInput, last: &UpdateStatus) {
     }
 }
 
-async fn audit_log(input: &EngineInput, last: &UpdateStatus) {
+/// Append one line per terminal status. `updater_version` is the new on-disk
+/// updater binary's `version` output (only on a successful install with a
+/// successful self-update probe) — its presence in the log is the proof that
+/// the updater replaced itself.
+async fn audit_log(input: &EngineInput, last: &UpdateStatus, updater_version: Option<&str>) {
     let Some(path) = input.audit_log_path.as_ref() else {
         return;
     };
@@ -611,7 +679,11 @@ async fn audit_log(input: &EngineInput, last: &UpdateStatus) {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let ts: chrono::DateTime<chrono::Utc> = SystemTime::now().into();
-    let line = format!("{ts}\tchannel={}\tstatus={}\n", input.channel, last);
+    let mut line = format!("{ts}\tchannel={}\tstatus={}", input.channel, last);
+    if let Some(version) = updater_version {
+        line.push_str(&format!("\tupdater_version={version}"));
+    }
+    line.push('\n');
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path).await {
         let _ = f.write_all(line.as_bytes()).await;
     }
@@ -632,6 +704,15 @@ pub(crate) mod install_platform {
     ///
     /// The process should be ready to exit immediately after this returns: the
     /// postinstall reloads launchd which respawns the new binary.
+    ///
+    /// INVARIANT: once this returns, the process is running from a
+    /// replaced/unlinked image — `self_update` renamed the on-disk binary
+    /// aside just before the spawn, and the pkg postinstall wrote a *new*
+    /// binary at `/usr/local/bin/gnosis_vpn-update`. All remaining work
+    /// (`persist_attempt`, `audit_log`, the terminal NDJSON emit, loader
+    /// dismiss) must not re-read or re-exec this process's own binary; the
+    /// only deliberate exec afterwards is `self_update::finish` probing the
+    /// NEW on-disk binary's `version`.
     pub async fn install(path: &Path, choice_changes: Option<&Path>) -> Result<(), String> {
         let mut command = Command::new("installer");
         command.arg("-pkg").arg(path).arg("-target").arg("/");
