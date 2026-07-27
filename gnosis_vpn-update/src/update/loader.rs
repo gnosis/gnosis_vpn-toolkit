@@ -141,7 +141,13 @@ async fn wait_for_loader_exit(pattern: &str, grace: Duration, poll: Duration) {
             Ok(out) if out.status.code() == Some(1) => return,
             // Still running, or pgrep itself misbehaved: keep the timed wait.
             Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "pgrep poll for loader failed to spawn"),
+            // A missing/unspawnable pgrep won't recover within the grace
+            // period; give up on the graceful wait and let the pkill
+            // fallback in `dismiss` take over.
+            Err(e) => {
+                tracing::warn!(error = %e, "pgrep poll for loader failed to spawn; skipping graceful wait");
+                return;
+            }
         }
         if tokio::time::Instant::now() >= deadline {
             return;
