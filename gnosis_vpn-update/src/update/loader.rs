@@ -8,10 +8,15 @@
 //! dir and opens it in the console user's GUI session for the duration of the
 //! install.
 //!
-//! Handshake: `show` writes `updating` to a world-readable status file; the
-//! loader app polls that file every 0.2 s and quits once it contains `done`
-//! (written by `dismiss`) or after its own ~120 s timeout, so it can never
-//! outlive the install by much even if this process dies. `dismiss` also
+//! Handshake: `show` writes `updating <pid>` to a world-readable status file;
+//! the loader app polls that file every 0.2 s and quits on the first of:
+//! `done` in the file (written by `dismiss`), the client app observed gone
+//! and then running again (the postinstall relaunched it), the file missing
+//! for ~2 s (already cleaned up), this process's pid dead with no
+//! `installer(8)` running (orphaned by a failed install), or its own ~120 s
+//! timeout. The applet must never depend on this process surviving: on an
+//! app-triggered update the pkg preinstall kills the app that spawned us and
+//! can take this process down with it before `dismiss` runs. `dismiss` also
 //! `pkill`s the loader as a fallback and cleans up the status file + temp dir.
 //!
 //! Everything here is best-effort cosmetics: any failure only logs a warning
@@ -32,9 +37,12 @@ const APP_BUNDLE_NAME: &str = "GnosisVPNUpdateLoader.app";
 /// Matched against process command lines by the `dismiss` pkill fallback; the
 /// loader's executable and script paths all contain it.
 const PKILL_PATTERN: &str = "GnosisVPNUpdateLoader";
-/// How long `dismiss` waits for the loader to notice `done` (it polls the
-/// status file every 0.2 s) before falling back to pkill.
+/// Upper bound on how long `dismiss` waits for the loader to notice `done`
+/// (it polls the status file every 0.2 s) before falling back to pkill; the
+/// wait returns as soon as no loader process is left.
 const DISMISS_GRACE: Duration = Duration::from_millis(1500);
+/// How often `dismiss` re-checks whether the loader already quit.
+const DISMISS_POLL: Duration = Duration::from_millis(200);
 
 // Compiled from assets/update-loader.applescript by build.rs (osacompile).
 static LOADER_APP_ZIP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/GnosisVPNUpdateLoader.app.zip"));
@@ -77,7 +85,9 @@ pub async fn show() -> Loader {
         return loader;
     };
 
-    if let Err(e) = write_status(Path::new(STATUS_FILE), "updating") {
+    // The pid lets the applet detect this process dying without ever writing
+    // "done" (see the module doc).
+    if let Err(e) = write_status(Path::new(STATUS_FILE), &format!("updating {}", std::process::id())) {
         tracing::warn!(error = %e, "cannot write loader status file; skipping loader window");
         return loader;
     }
@@ -111,7 +121,7 @@ pub async fn dismiss(loader: Loader) {
     if let Err(e) = write_status(Path::new(STATUS_FILE), "done") {
         tracing::warn!(error = %e, "cannot write done to loader status file; relying on pkill");
     }
-    tokio::time::sleep(DISMISS_GRACE).await;
+    wait_for_loader_exit(PKILL_PATTERN, DISMISS_GRACE, DISMISS_POLL).await;
 
     // Exit status 1 just means "no process matched" (already quit) — ignore.
     if let Err(e) = Command::new("pkill").arg("-f").arg(PKILL_PATTERN).output().await {
@@ -119,6 +129,25 @@ pub async fn dismiss(loader: Loader) {
     }
 
     cleanup(Path::new(STATUS_FILE), loader.temp_dir.as_deref());
+}
+
+/// Wait until no process matches `pattern` (the loader quit on its own — it
+/// often already has, having seen the relaunched app) or `grace` elapses,
+/// re-checking every `poll`. pgrep exit code 1 means "no match".
+async fn wait_for_loader_exit(pattern: &str, grace: Duration, poll: Duration) {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        match Command::new("pgrep").arg("-f").arg(pattern).output().await {
+            Ok(out) if out.status.code() == Some(1) => return,
+            // Still running, or pgrep itself misbehaved: keep the timed wait.
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "pgrep poll for loader failed to spawn"),
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(poll).await;
+    }
 }
 
 /// Write `contents` to the loader status file, creating the parent directory
@@ -259,14 +288,36 @@ mod tests {
         let dir = TempDir::new("status");
         let status = dir.path("nested/dir/update_status");
 
-        write_status(&status, "updating").unwrap();
-        assert_eq!(std::fs::read_to_string(&status).unwrap(), "updating");
+        // The applet reads the pid as word 2 of the "updating <pid>" line.
+        let updating = format!("updating {}", std::process::id());
+        write_status(&status, &updating).unwrap();
+        assert_eq!(std::fs::read_to_string(&status).unwrap(), updating);
         let mode = std::fs::metadata(&status).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
 
         // Overwriting with the done sentinel replaces the contents.
         write_status(&status, "done").unwrap();
         assert_eq!(std::fs::read_to_string(&status).unwrap(), "done");
+    }
+
+    #[tokio::test]
+    async fn wait_for_loader_exit_returns_immediately_when_nothing_matches() {
+        let start = std::time::Instant::now();
+        wait_for_loader_exit(
+            &format!("gnosisvpn-loader-test-{}-no-such-process", std::process::id()),
+            Duration::from_secs(5),
+            Duration::from_millis(200),
+        )
+        .await;
+        // Far below the 5 s grace: the first pgrep miss must end the wait.
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn dismiss_is_a_noop_for_an_inactive_loader() {
+        let start = std::time::Instant::now();
+        dismiss(Loader::inactive()).await;
+        assert!(start.elapsed() < Duration::from_millis(500));
     }
 
     #[test]

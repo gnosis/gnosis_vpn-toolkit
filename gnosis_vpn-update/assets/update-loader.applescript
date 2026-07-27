@@ -3,11 +3,22 @@
 -- Shown by gnosis_vpn-update while installer(8) replaces the client: the pkg
 -- preinstall kills the "Gnosis VPN.app" UI early and the postinstall only
 -- relaunches it at the very end, so without this window the user stares at a
--- dead desktop for the whole install. The updater writes "updating" to the
--- status file before launching this applet and "done" once the install
--- finished (success or failure); the applet polls the file and quits on
--- "done". A hard iteration cap (600 polls x 0.2 s = ~120 s) guarantees the
--- window can never linger if the updater dies without writing "done".
+-- dead desktop for the whole install. The updater writes "updating <pid>" to
+-- the status file before launching this applet and "done" once the install
+-- finished (success or failure).
+--
+-- The applet must never depend on the updater surviving: when the update is
+-- triggered from the app, the preinstall's pkill of the app can take the
+-- updater down with it, so "done" may never arrive. It quits on the FIRST of:
+--   1. "done" in the status file;
+--   2. the client app observed gone and then running again — the postinstall
+--      relaunched it (this fires while installer(8) may still be running,
+--      and is the primary "update finished" signal for the user);
+--   3. the status file missing for ~10 consecutive polls (~2 s) — the
+--      updater already cleaned up before this applet got to read it;
+--   4. the updater PID dead AND no installer(8) running, twice in a row
+--      (checked every ~2 s) — orphaned by a failed install;
+--   5. a hard iteration cap (600 polls x 0.2 s = ~120 s), the last resort.
 --
 -- The window is drawn directly with AppleScriptObjC (a titled, buttonless
 -- NSWindow with a slowly filling progress bar) instead of AppleScript's
@@ -26,6 +37,14 @@
 use framework "AppKit"
 use framework "Foundation"
 use scripting additions
+
+-- Bundle id of the client app the pkg postinstall relaunches. Keep in sync
+-- with the Tauri identifier in the gnosis_vpn-app repo (productName
+-- "Gnosis VPN"). Presence is checked in-process via NSRunningApplication:
+-- shelling out to `pgrep -f "Gnosis VPN"` would put the forbidden substring
+-- on a child process's command line, inside the preinstall pkill's blast
+-- radius (see the constraint above).
+property appBundleId : "com.gnosisvpn.gnosisvpnclient"
 
 on run
 	set statusFile to "/Library/Logs/GnosisVPN/installer/update_status"
@@ -62,13 +81,62 @@ on run
 	(win's makeKeyAndOrderFront:(missing value))
 	(ca's NSApp's activateIgnoringOtherApps:true)
 
+	set sawAppGone to false
+	set missingReads to 0
+	set orphanStrikes to 0
+	set updaterPid to ""
 	repeat with i from 1 to 600 -- 600 x 0.2 s = ~120 s self-timeout
 		try
 			set statusContent to do shell script "/bin/cat " & quoted form of statusFile
+			set missingReads to 0
 			if statusContent contains "done" then exit repeat
+			if updaterPid is "" then
+				try
+					-- "updating <pid>"; the integer round-trip validates the
+					-- pid before it is ever spliced into a shell command.
+					set updaterPid to ((word 2 of statusContent) as integer) as text
+				end try
+			end if
 		on error
-			-- Status file missing or unreadable: keep waiting until the timeout.
+			-- Status file missing/unreadable: the updater finished and
+			-- cleaned up before this applet got to read "done". Tolerate
+			-- brief glitches, then quit instead of lingering to the timeout.
+			set missingReads to missingReads + 1
+			if missingReads ≥ 10 then exit repeat -- ~2 s
 		end try
+		-- Quit as soon as the postinstall has relaunched the client app:
+		-- gone-then-back is the user-visible "update finished" signal, and it
+		-- fires while installer(8)/the updater may still be running. Fresh
+		-- class-method query every tick — never cache NSRunningApplication
+		-- instances, their properties only refresh with run-loop turns.
+		set apps to (ca's NSRunningApplication's runningApplicationsWithBundleIdentifier:appBundleId)
+		if ((apps's |count|()) as integer) is 0 then
+			set sawAppGone to true
+		else if sawAppGone then
+			exit repeat
+		end if
+		-- Every ~2 s: quit when both the updater and installer(8) are gone —
+		-- a failed install with nobody left to write "done" or relaunch the
+		-- app. Two strikes so a momentary gap cannot close the window while
+		-- an orphaned install is still finishing.
+		if updaterPid is not "" and (i mod 10) is 0 then
+			set orphaned to false
+			try
+				do shell script "/bin/ps -p " & updaterPid
+			on error
+				try
+					do shell script "/usr/bin/pgrep -x installer"
+				on error
+					set orphaned to true
+				end try
+			end try
+			if orphaned then
+				set orphanStrikes to orphanStrikes + 1
+				if orphanStrikes ≥ 2 then exit repeat
+			else
+				set orphanStrikes to 0
+			end if
+		end if
 		-- Piecewise linear schedule (i is 0.2 s ticks): 0→40% over the first
 		-- 10 s, →60% over the next 10 s, →80% over the next 40 s, →100% over
 		-- the final 60 s, reaching full exactly at the self-timeout.
