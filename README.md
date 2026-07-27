@@ -56,7 +56,7 @@ channel is inferred from that version string (a plain dotted-numeric version is
 a stable release; anything carrying build/pr/commit metadata — with `+` or its
 registry-slugged `-` form — is a snapshot-line build) and is the default when
 `--channel` is omitted — a snapshot install stays on snapshot, a stable install
-stays on stable. Requesting the *other*
+stays on stable. Requesting the _other_
 channel explicitly is always offered/installed — switching stable ⇄ snapshot
 skips the newer-version gate, which only applies within the same channel.
 
