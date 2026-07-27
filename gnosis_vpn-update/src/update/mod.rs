@@ -400,75 +400,99 @@ async fn drive_engine(
         .await
         .map_err(|e| (UpdateStage::Verify, e))?;
 
+    // Pin the installer choices *before* showing the loader so a failure here
+    // never leaves the window up, and the show→dismiss span below stays a
+    // straight line with no early return.
+    let choice_changes_path = write_choice_changes(&choices::InstallerChoices::detect(), &input.download_dir)
+        .await
+        .map_err(|e| (UpdateStage::Install, e))?;
+
+    // From here on the install must run to completion: on an app-triggered
+    // update the pkg preinstall kills the app that spawned this process and
+    // the collateral signals must not take the updater down mid-install —
+    // a half-applied install is worse than an ignored signal, and dying here
+    // orphans the loader window, skips the self-update settling, and loses
+    // the attempt/audit records. The process exits naturally right after the
+    // engine finishes, so the dispositions are never restored.
+    #[cfg(target_os = "macos")]
+    shield_from_termination();
+
     // Show the loader window before announcing `Installing`. It must be
     // dismissed on every path out of the install — success and failure alike —
-    // which is why the whole install phase lives in `run_install` and dismiss
-    // happens on its single exit point below.
+    // so no `?`/early return is allowed between here and `dismiss` below.
     #[cfg(target_os = "macos")]
     let loader = loader::show().await;
 
     let _ = tx.send(UpdateStatus::Installing).await;
-
-    let install_result = run_install(input, &artifact_path).await;
-
-    #[cfg(target_os = "macos")]
-    loader::dismiss(loader).await;
-
-    let updater_version = install_result?;
-    Ok(EngineOutcome {
-        version: release.version.clone(),
-        updater_version,
-    })
-}
-
-/// The install phase, bracketed by loader show/dismiss in `drive_engine`:
-/// pin the installer choices, rename the running updater binary aside (see
-/// `self_update`), run `installer(8)`, then settle the self-update. Returns
-/// the new on-disk updater binary's `version` output when the install (and
-/// the self-update probe) succeeded.
-async fn run_install(
-    input: &EngineInput,
-    artifact_path: &std::path::Path,
-) -> Result<Option<String>, (UpdateStage, String)> {
-    // Pin the installed network/loglevel selections so the pkg's default
-    // choices (jura, debug) don't flip them on a CLI install — see `choices`.
-    let installed_choices = choices::InstallerChoices::detect();
-    let choice_changes_path = match installed_choices.to_choice_changes_xml() {
-        Some(xml) => {
-            tracing::info!(
-                network = ?installed_choices.network,
-                loglevel = ?installed_choices.loglevel,
-                "pinning installer choices to the installed selection"
-            );
-            let path = input.download_dir.join("choice_changes.xml");
-            tokio::fs::write(&path, xml).await.map_err(|e| {
-                (
-                    UpdateStage::Install,
-                    format!("cannot write installer choice changes: {e}"),
-                )
-            })?;
-            Some(path)
-        }
-        None => {
-            tracing::warn!("no installed network/loglevel selection detected; installer defaults apply");
-            None
-        }
-    };
 
     // Rename the running binary aside so the pkg postinstall's `cp` of the new
     // updater succeeds instead of silently failing on the running Mach-O.
     #[cfg(target_os = "macos")]
     let aside = self_update::rename_aside();
 
-    let install_result = install_platform::install(artifact_path, choice_changes_path.as_deref()).await;
+    let install_result = install_platform::install(&artifact_path, choice_changes_path.as_deref()).await;
 
+    // Dismiss as soon as installer(8) returns: on CLI installs the postinstall
+    // relaunches the app *mid-postinstall* — before installer(8) even exits —
+    // and the self-update probe below can stall for seconds on the fresh
+    // binary's first exec (Gatekeeper). The loader must not outlive the app's
+    // reappearance any longer than it has to.
+    #[cfg(target_os = "macos")]
+    loader::dismiss(loader).await;
+
+    // Settle the rename-aside on both outcomes (failure restores the old
+    // binary) — which is why `install_result` is not `?`-ed until after it.
     #[cfg(target_os = "macos")]
     let updater_version = self_update::finish(aside, install_result.is_ok()).await;
     #[cfg(not(target_os = "macos"))]
     let updater_version = None;
 
     install_result.map_err(|e| (UpdateStage::Install, e))?;
-    Ok(updater_version)
+    Ok(EngineOutcome {
+        version: release.version.clone(),
+        updater_version,
+    })
+}
+
+/// Write the choice-changes plist pinning the installed network/loglevel
+/// selections into `dir` and return its path, so the pkg's default choices
+/// (jura, debug) don't flip them on a CLI install — see `choices`. `None`
+/// (with a warning) when no installed selection was detected.
+async fn write_choice_changes(
+    installed: &choices::InstallerChoices,
+    dir: &std::path::Path,
+) -> Result<Option<PathBuf>, String> {
+    match installed.to_choice_changes_xml() {
+        Some(xml) => {
+            tracing::info!(
+                network = ?installed.network,
+                loglevel = ?installed.loglevel,
+                "pinning installer choices to the installed selection"
+            );
+            let path = dir.join("choice_changes.xml");
+            tokio::fs::write(&path, xml)
+                .await
+                .map_err(|e| format!("cannot write installer choice changes: {e}"))?;
+            Ok(Some(path))
+        }
+        None => {
+            tracing::warn!("no installed network/loglevel selection detected; installer defaults apply");
+            Ok(None)
+        }
+    }
+}
+
+/// Ignore SIGTERM/SIGINT/SIGHUP for the rest of the process's life. `SIG_IGN`
+/// dispositions are process-wide and inherited-safe (no handler code runs, so
+/// this is compatible with `panic = "abort"`); SIGKILL cannot be shielded —
+/// the loader applet's own exit conditions cover that case.
+#[cfg(target_os = "macos")]
+fn shield_from_termination() {
+    unsafe {
+        libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -709,27 +733,52 @@ pub(crate) mod install_platform {
     /// replaced/unlinked image — `self_update` renamed the on-disk binary
     /// aside just before the spawn, and the pkg postinstall wrote a *new*
     /// binary at `/usr/local/bin/gnosis_vpn-update`. All remaining work
-    /// (`persist_attempt`, `audit_log`, the terminal NDJSON emit, loader
-    /// dismiss) must not re-read or re-exec this process's own binary; the
-    /// only deliberate exec afterwards is `self_update::finish` probing the
-    /// NEW on-disk binary's `version`.
+    /// (loader dismiss — which deliberately runs before the probe so the
+    /// window closes as soon as the install ends — `persist_attempt`,
+    /// `audit_log`, the terminal NDJSON emit) must not re-read or re-exec
+    /// this process's own binary; the only deliberate exec afterwards is
+    /// `self_update::finish` probing the NEW on-disk binary's `version`.
     pub async fn install(path: &Path, choice_changes: Option<&Path>) -> Result<(), String> {
+        use std::process::Stdio;
+        use std::time::Duration;
+
         let mut command = Command::new("installer");
         command.arg("-pkg").arg(path).arg("-target").arg("/");
         if let Some(changes) = choice_changes {
             command.arg("-applyChoiceChangesXML").arg(changes);
         }
-        let output = command
-            .output()
+
+        // Wait for the CHILD to exit, not for pipe EOF (`output()` waits for
+        // the latter): anything the install scripts leave behind holding a
+        // dup of these pipes would otherwise block the update — and the
+        // loader's dismissal — indefinitely. The pipes only feed the error
+        // message below, so draining them is best-effort with a short cap.
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|e| format!("installer spawn failed: {e}"))?;
+        let stdout_task = drain(child.stdout.take());
+        let stderr_task = drain(child.stderr.take());
+        let status = child.wait().await.map_err(|e| format!("installer wait failed: {e}"))?;
+
+        const DRAIN_CAP: Duration = Duration::from_secs(2);
+        let stdout = tokio::time::timeout(DRAIN_CAP, stdout_task)
             .await
-            .map_err(|e| format!("installer spawn failed: {e}"))?;
-        if output.status.success() {
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        let stderr = tokio::time::timeout(DRAIN_CAP, stderr_task)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+
+        if status.success() {
             Ok(())
         } else {
             // installer(8) reports failures on stdout (and in
             // /var/log/install.log); stderr is usually empty.
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
             let detail = [stdout.trim(), stderr.trim()]
                 .iter()
                 .filter(|s| !s.is_empty())
@@ -741,8 +790,26 @@ pub(crate) mod install_platform {
             } else {
                 detail
             };
-            Err(format!("installer exited with {}: {detail}", output.status))
+            Err(format!("installer exited with {status}: {detail}"))
         }
+    }
+
+    /// Read `pipe` to a lossy string in the background so the child never
+    /// stalls on a full pipe. The task is detached: if a stray fd-holder
+    /// keeps the pipe open past the child's exit, `install`'s drain cap
+    /// abandons it instead of waiting.
+    fn drain<R>(pipe: Option<R>) -> tokio::task::JoinHandle<String>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    {
+        tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut pipe) = pipe {
+                use tokio::io::AsyncReadExt;
+                let _ = pipe.read_to_end(&mut buf).await;
+            }
+            String::from_utf8_lossy(&buf).into_owned()
+        })
     }
 }
 
@@ -779,6 +846,43 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         assert!(read_installed_version(&path).unwrap_err().contains("cannot read"));
+    }
+
+    #[tokio::test]
+    async fn write_choice_changes_writes_xml_and_returns_its_path() {
+        let dir = std::env::temp_dir().join(format!("gnosis_vpn-update-test-choices-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let installed = choices::InstallerChoices {
+            network: Some("rotsee".to_string()),
+            loglevel: Some("info".to_string()),
+        };
+        let path = write_choice_changes(&installed, &dir).await.unwrap().unwrap();
+        assert_eq!(path, dir.join("choice_changes.xml"));
+        let xml = std::fs::read_to_string(&path).unwrap();
+        assert!(xml.contains("rotsee"));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_choice_changes_is_none_without_installed_selection_and_errs_on_bad_dir() {
+        let no_selection = choices::InstallerChoices::default();
+        assert_eq!(
+            write_choice_changes(&no_selection, &std::env::temp_dir())
+                .await
+                .unwrap(),
+            None
+        );
+
+        let installed = choices::InstallerChoices {
+            network: Some("rotsee".to_string()),
+            loglevel: None,
+        };
+        let missing_dir = std::env::temp_dir().join(format!("gnosis_vpn-update-test-nodir-{}", std::process::id()));
+        let err = write_choice_changes(&installed, &missing_dir).await.unwrap_err();
+        assert!(err.contains("cannot write installer choice changes"));
     }
 
     #[test]
