@@ -10,6 +10,7 @@
 //! `installer(8)`. macOS only.
 
 pub mod choices;
+mod download;
 #[cfg(target_os = "macos")]
 pub mod loader;
 pub mod paths;
@@ -511,6 +512,15 @@ enum DownloadError {
     InsecureUrl(String),
     #[error("manifest download URL has no safe artifact filename: {0}")]
     InvalidFilename(String),
+    #[error("connection lost: gave up after {offline_secs}s offline at byte {bytes_done} of {expected}: {last_error}")]
+    ConnectionLost {
+        offline_secs: u64,
+        bytes_done: u64,
+        expected: u64,
+        last_error: String,
+    },
+    #[error("unexpected http status: {0}")]
+    UnexpectedStatus(reqwest::StatusCode),
 }
 
 const FREE_SPACE_HEADROOM: u64 = 500 * 1024 * 1024; // plan: size + 500 MB headroom
@@ -581,13 +591,6 @@ async fn download_artifact(input: &EngineInput, release: &ChannelRelease) -> Res
         return Err(DownloadError::InsufficientSpace { needed: need, free });
     }
 
-    let mut response = input
-        .client
-        .get(release.download_url.clone())
-        .send()
-        .await?
-        .error_for_status()?;
-
     let mut file = OpenOptions::new().write(true).create_new(true).open(&target).await?;
     #[cfg(unix)]
     {
@@ -595,11 +598,26 @@ async fn download_artifact(input: &EngineInput, release: &ChannelRelease) -> Res
         let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600)).await;
     }
 
-    let mut bytes_done: u64 = 0;
-    while let Some(chunk) = response.chunk().await? {
-        file.write_all(&chunk).await?;
-        bytes_done += chunk.len() as u64;
-    }
+    // The download runs over the VPN link itself — high latency, routine
+    // connection drops. fetch_with_resume retries and continues via HTTP Range
+    // requests instead of failing on the first drop; on error the partial file
+    // is removed so a re-run starts fresh (no cross-run resume).
+    let bytes_done = match download::fetch_with_resume(
+        &input.client,
+        &release.download_url,
+        &mut file,
+        expected,
+        &download::RetryPolicy::PROD,
+    )
+    .await
+    {
+        Ok(n) => n,
+        Err(e) => {
+            drop(file);
+            let _ = tokio::fs::remove_file(&target).await;
+            return Err(e);
+        }
+    };
     file.flush().await?;
     drop(file);
 

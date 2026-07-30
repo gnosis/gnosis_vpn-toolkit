@@ -35,6 +35,12 @@ impl fmt::Display for Hash {
 // const PUBLIC_KEY: &str = include_str!("../gnosisvpn-public-key.asc");
 const MANIFEST_BASE_URL: &str = "https://download.gnosisvpn.io/manifests/";
 
+/// Total per-request deadline for the small in-memory manifest/signature
+/// fetches. The shared client deliberately has no total timeout (the artifact
+/// download must be allowed to run long), so these bounded fetches set their
+/// own.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
 
@@ -131,6 +137,7 @@ pub async fn download(client: &Client) -> Result<Manifest, Error> {
 
     let manifest_bytes = client
         .get(manifest_url)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .and_then(|r| r.error_for_status())
@@ -141,6 +148,7 @@ pub async fn download(client: &Client) -> Result<Manifest, Error> {
 
     let sig_bytes = client
         .get(sig_url)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .and_then(|r| r.error_for_status())
