@@ -25,9 +25,21 @@ async fn main() {
     process::exit(code);
 }
 
+/// Connect (TCP+TLS) deadline per attempt. A TLS 1.3 handshake over a 3 s-RTT
+/// VPN link needs ~4 round trips; lost handshake packets are absorbed by the
+/// download's retry loop, not by a longer timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Max idle gap between body reads — the stall detector for silently dead
+/// connections. Deliberately NOT a total request deadline: a healthy-but-slow
+/// multi-hundred-MB artifact download must be allowed to take arbitrarily
+/// long (see `update::download`). Small fetches that want a total deadline
+/// set one per request (see `manifest::REQUEST_TIMEOUT`).
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(READ_TIMEOUT)
         .build()
         .map_err(|e| e.to_string())
 }
