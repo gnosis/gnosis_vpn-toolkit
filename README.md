@@ -20,9 +20,21 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   default) each line is one JSON value (newline-delimited JSON / NDJSON):
   - `update` streams `UpdateStatus` events (`Checking`, `Downloading`,
     `Installing`, then a terminal `Completed` or `Failed`).
-  - `check-update` prints a single result object (`UpToDate`, `Available`,
-    `NoReleaseForChannel`, `VpnNotConnected`, `IntegrityError`, `Error`).
-  - `version` prints `{"version": "…"}`.
+  - `check-update` prints a single result object
+    `{"channel": …, "outcome": …, "manifest": …}`. `outcome` is the gated
+    decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
+    `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
+    was checked — the `--channel` value, or the channel inferred from the
+    installed version. `manifest` is the update manifest exactly as fetched,
+    carrying **both** `channels.stable` and `channels.snapshot`, so one
+    invocation yields the whole release picture as well as the decision; it is
+    omitted on the three outcomes that never got a manifest
+    (`VpnNotConnected`, `IntegrityError`, `Error`), where a consumer should
+    keep its last known one.
+  - `version` prints `{"version": "…", "package_version": "…"}`, where
+    `package_version` is the installed client version from
+    `/etc/gnosisvpn/version.txt` (`null` when the client is not installed).
+    With `--output plain` it prints only the binary's own version.
     The JSON uses serde's externally-tagged enum encoding.
 - **stderr** carries human logs / diagnostics (`RUST_LOG`, default `info`), and
   the human-readable output when `--output plain` is used.
@@ -37,13 +49,13 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 # connected, or --force)
 gnosis_vpn-update check-update
 
-# Install an update (must run as root; streams progress as NDJSON)
+# Install an update (macOS only; must run as root; streams progress as NDJSON)
 sudo gnosis_vpn-update update
 
 # Switch channels explicitly
 sudo gnosis_vpn-update update --channel stable
 
-# Print the binary's own version
+# Print this binary's version and the installed client's
 gnosis_vpn-update version
 ```
 
@@ -51,7 +63,8 @@ Installing an update performs privileged work (`installer(8)`) and therefore
 must be launched with root privileges. `gnosis_vpn-app` is responsible for
 elevating (Authorization Services on macOS). The currently-installed client
 version is read from `/etc/gnosisvpn/version.txt`, the file the client
-installer writes; if it is missing or empty both commands fail. The installed
+installer writes; if it is missing or empty `update` and `check-update` fail
+(`version` reports `package_version: null` and still exits 0). The installed
 channel is inferred from that version string (a plain dotted-numeric version is
 a stable release; anything carrying build/pr/commit metadata — with `+` or its
 registry-slugged `-` form — is a snapshot-line build) and is the default when
@@ -67,11 +80,23 @@ to the choice files under `/Library/Logs/GnosisVPN/installer/`) and pins it via
 `installer -applyChoiceChangesXML`, so a CLI-driven update never flips a rotsee
 install back to the package default (jura).
 
+## Platform support
+
+`check-update` and `version` behave identically on macOS and Linux. `update`
+has an install engine only on macOS; on Linux it refuses immediately — before
+the VPN check, the manifest fetch or any download — and prints the apt commands
+that update a Gnosis VPN install:
+
+```console
+sudo apt-get update
+sudo apt-get install -y gnosisvpn
+```
+
 ## Development
 
-The toolkit targets **macOS** (Apple Silicon); build and test on macOS. This
-repo uses Nix. With `direnv`, `cd` into the repo to enter the dev shell;
-otherwise:
+The crate builds on macOS (Apple Silicon) and Linux (x86_64 and aarch64), but
+the install engine is macOS-only — exercise it there. This repo uses Nix. With
+`direnv`, `cd` into the repo to enter the dev shell; otherwise:
 
 ```console
 nix develop            # dev shell with the rust toolchain + tooling
@@ -80,10 +105,12 @@ cargo test             # runs the workspace test suite
 nix flake check -L     # clippy + tests + audit + licenses
 ```
 
-The signed release binary is built with:
+The release binaries are per target — statically linked against musl on Linux:
 
 ```console
-nix build .#binary-gnosis_vpn-update-aarch64-darwin
+nix build .#binary-gnosis_vpn-update-aarch64-darwin   # on a macOS host
+nix build .#binary-gnosis_vpn-update-x86_64-linux     # or: just build-x86_64
+nix build .#binary-gnosis_vpn-update-aarch64-linux    # or: just build-arm64
 ```
 
 ## License

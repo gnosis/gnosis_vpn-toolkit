@@ -6,8 +6,14 @@
 
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
 fn base_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support/GnosisVPN")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn base_dir() -> PathBuf {
+    PathBuf::from("/var/lib/gnosisvpn")
 }
 
 pub fn download_dir() -> PathBuf {

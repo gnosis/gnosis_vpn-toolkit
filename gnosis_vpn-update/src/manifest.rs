@@ -44,6 +44,12 @@ pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::fro
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const MANIFEST_FILENAME: &str = "linux-amd64.json";
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const MANIFEST_FILENAME: &str = "linux-arm64.json";
+
 /// Release channel selector for picking an entry out of a `Manifest`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -186,9 +192,24 @@ mod tests {
         assert!(!stable.version.is_empty(), "stable version should not be empty");
     }
 
+    /// Every fixture the publishing pipeline generates, regardless of the
+    /// platform this test binary was built for — the fixtures are read by name
+    /// and never go through `MANIFEST_FILENAME`.
+    const ALL_FIXTURES: [&str; 3] = ["macos-arm64.json", "linux-amd64.json", "linux-arm64.json"];
+
     #[test]
     fn verify_macos_arm64() {
         verify_fixture("macos-arm64.json");
+    }
+
+    #[test]
+    fn verify_linux_amd64() {
+        verify_fixture("linux-amd64.json");
+    }
+
+    #[test]
+    fn verify_linux_arm64() {
+        verify_fixture("linux-arm64.json");
     }
 
     // TODO: re-enable once PGP verification is restored in verify_and_parse.
@@ -205,15 +226,17 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_macos_fixture() {
-        let name = "macos-arm64.json";
-        let bytes = fixture(name);
-        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
-        let stable = manifest.channels.stable.expect("stable channel");
-        assert_eq!(stable.sha256.0.len(), 32);
-        assert!(stable.size_bytes.as_u64() > 0);
-        assert!(stable.published_at.timestamp() > 0);
-        assert!(!stable.min_os_version.is_empty());
+    fn deserializes_all_fixtures() {
+        for name in ALL_FIXTURES {
+            let bytes = fixture(name);
+            let manifest: Manifest =
+                serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
+            let stable = manifest.channels.stable.expect("stable channel");
+            assert_eq!(stable.sha256.0.len(), 32);
+            assert!(stable.size_bytes.as_u64() > 0);
+            assert!(stable.published_at.timestamp() > 0);
+            assert!(!stable.min_os_version.is_empty());
+        }
     }
 
     // TODO: re-add a mismatched-signature test once PGP verification is restored
