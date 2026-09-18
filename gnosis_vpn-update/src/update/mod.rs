@@ -350,7 +350,7 @@ pub async fn check(
         return bare(CheckOutcome::VpnNotConnected);
     }
 
-    let manifest = match manifest::download(client).await {
+    let manifest = match manifest::download(client, channel).await {
         Ok(m) => m,
         Err(manifest::Error::Integrity(msg)) => return bare(CheckOutcome::IntegrityError(msg)),
         Err(e) => return bare(CheckOutcome::Error(e.to_string())),
@@ -460,7 +460,7 @@ async fn drive_engine(
             .await
             .map_err(|e| (UpdateStage::Check, e.to_string()))?;
     }
-    let manifest = manifest::download(&input.client)
+    let manifest = manifest::download(&input.client, input.channel)
         .await
         .map_err(|e| (UpdateStage::Check, e.to_string()))?;
 

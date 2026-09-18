@@ -33,7 +33,22 @@ impl fmt::Display for Hash {
 
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
 // const PUBLIC_KEY: &str = include_str!("../gnosisvpn-public-key.asc");
-const MANIFEST_BASE_URL: &str = "https://download.gnosisvpn.io/manifests/";
+/// Manifest host for the **stable** channel: the ENS/IPFS gateway, so a
+/// production update check does not depend on a single centrally-hosted
+/// origin. Only the manifest is fetched from here — this is deliberately the
+/// plain `<platform>.json` and not the `.ipfs.json` variant, so the artifact
+/// `download_url`s it carries still point at the GCS origin.
+///
+/// The gateway rejects requests with no `User-Agent` (403), so the shared
+/// client must set one — see `USER_AGENT` in `main.rs`. It is also slower and
+/// less reliable than the origin (multi-second responses, occasional 504 on a
+/// cold cache), which is what `REQUEST_TIMEOUT` has to absorb.
+const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/manifests/";
+
+/// Manifest host for the pre-release channels. The IPFS mirror lags the origin
+/// by hours (snapshot) to days (experimental), and nightly builds need what was
+/// published minutes ago, so they read straight from GCS.
+const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
 /// Total per-request deadline for the small in-memory manifest/signature
 /// fetches. The shared client deliberately has no total timeout (the artifact
@@ -111,6 +126,16 @@ impl Manifest {
     }
 }
 
+/// Which host to read the manifest from. Stable — the channel real users run —
+/// comes off the ENS/IPFS gateway; the pre-release channels come off the origin
+/// that publishes them.
+fn base_url(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Stable => MANIFEST_BASE_URL_STABLE,
+        Channel::Snapshot => MANIFEST_BASE_URL_PRERELEASE,
+    }
+}
+
 fn verify_and_parse(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest, Error> {
     // TODO: re-enable PGP signature verification once the public key is hosted
     // externally. The verification code below is complete; uncomment this block
@@ -130,12 +155,15 @@ fn verify_and_parse(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest,
 
 /// Download and verify the update manifest for the current platform.
 ///
+/// `channel` selects the host only (see `base_url`); the manifest fetched
+/// carries every channel either way, so a cross-channel check still resolves.
+///
 /// The VPN-connected gate is *not* applied here — callers that want it must
 /// call [`crate::vpn_status::ensure_connected`] first (see the `update` and
 /// `check-update` flows).
-pub async fn download(client: &Client) -> Result<Manifest, Error> {
+pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Error> {
     let sig_filename = MANIFEST_FILENAME.replace(".json", ".json.asc");
-    let base = url::Url::parse(MANIFEST_BASE_URL).map_err(|e| Error::Other(e.to_string()))?;
+    let base = url::Url::parse(base_url(channel)).map_err(|e| Error::Other(e.to_string()))?;
     let manifest_url = base.join(MANIFEST_FILENAME).map_err(|e| Error::Other(e.to_string()))?;
     let sig_url = base.join(&sig_filename).map_err(|e| Error::Other(e.to_string()))?;
 
@@ -196,6 +224,22 @@ mod tests {
     /// platform this test binary was built for — the fixtures are read by name
     /// and never go through `MANIFEST_FILENAME`.
     const ALL_FIXTURES: [&str; 3] = ["macos-arm64.json", "linux-amd64.json", "linux-arm64.json"];
+
+    #[test]
+    fn stable_reads_the_ipfs_gateway_and_prerelease_the_origin() {
+        let join = |channel| {
+            url::Url::parse(base_url(channel))
+                .unwrap()
+                .join(MANIFEST_FILENAME)
+                .unwrap()
+                .to_string()
+        };
+        // The plain `<platform>.json`, never the `.ipfs.json` variant: that one
+        // is stable-only and its download_urls are IPFS paths.
+        assert!(!join(Channel::Stable).contains(".ipfs.json"));
+        assert!(join(Channel::Stable).starts_with("https://download.vpn.gnosis.eth.limo/manifests/"));
+        assert!(join(Channel::Snapshot).starts_with("https://download.gnosisvpn.io/manifests/"));
+    }
 
     #[test]
     fn verify_macos_arm64() {

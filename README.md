@@ -73,6 +73,25 @@ stays on stable. Requesting the _other_
 channel explicitly is always offered/installed — switching stable ⇄ snapshot
 skips the newer-version gate, which only applies within the same channel.
 
+### Where manifests come from
+
+The **stable** manifest is read from the ENS/IPFS gateway at
+`https://download.vpn.gnosis.eth.limo/manifests/`, so a production update check
+does not depend on a single centrally-hosted origin. **Snapshot** reads
+`https://download.gnosisvpn.io/manifests/` directly — the IPFS mirror lags the
+origin by hours, and nightly builds need what was published minutes ago.
+
+Either way the plain `<platform>.json` is used, never the `.ipfs.json` variant
+(that one is stable-only and its `download_url`s are IPFS paths), so **artifacts
+always download from `download.gnosisvpn.io`** regardless of which host served
+the manifest. Two consequences worth knowing:
+
+- The gateway rejects requests without a `User-Agent` (403) and answers more
+  slowly than the origin, occasionally 504-ing on a cold cache.
+- A stable check returns the gateway's copy of the _whole_ manifest, so the
+  `snapshot` entry it reports can be a few hours behind. A snapshot check
+  reports the current one.
+
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
 selection (from the `/etc/gnosisvpn/config.toml` symlink target, falling back

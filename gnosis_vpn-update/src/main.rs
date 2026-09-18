@@ -39,8 +39,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// set one per request (see `manifest::REQUEST_TIMEOUT`).
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Sent on every request. Not cosmetic: the ENS gateway serving the stable
+/// manifest (`manifest::MANIFEST_BASE_URL_STABLE`) answers **403** to requests
+/// with no User-Agent, and reqwest sends none by default. Any non-empty value
+/// satisfies it. The request already rides the VPN tunnel and its path already
+/// names the platform, so naming the updater adds no meaningful fingerprint.
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()
