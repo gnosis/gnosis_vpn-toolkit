@@ -22,12 +22,12 @@ jobs:
       matrix:
         include:
           - architecture: x86_64-linux
-            runner: depot-ubuntu-22.04-4 # Depot Ubuntu 22.04, 4 CPUs, 16 GB RAM
+            runner: depot-ubuntu-22.04-4
             build_command: nix build -L .#binary-gnosis_vpn-update-x86_64-linux
             build_debug_command: nix build -L .#binary-gnosis_vpn-update-x86_64-linux-dev
-            required_label: ""
+            required_label: "binary:x86_64-linux"
           - architecture: aarch64-linux
-            runner: depot-ubuntu-22.04-arm-4 # Depot Ubuntu 22.04 ARM, 4 CPUs, 16 GB RAM
+            runner: depot-ubuntu-22.04-arm-4
             build_command: nix build -L .#binary-gnosis_vpn-update-aarch64-linux
             build_debug_command: nix build -L .#binary-gnosis_vpn-update-aarch64-linux-dev
             required_label: "binary:aarch64-linux"
@@ -54,7 +54,7 @@ jobs:
       gcp_service_account: download-gnosisvpn-gh-sa@gnosisvpn-production.iam.gserviceaccount.com
       runner: ${{ matrix.runner }}
       timeout_minutes: 240
-      enabled: ${{ matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, matrix.required_label) }}
+      enabled: ${{ matrix.required_label == '' || contains(github.event.pull_request.labels.*.name, 'binary:all') || contains(github.event.pull_request.labels.*.name, matrix.required_label) }}
     secrets:
       cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
       gpg_private_key: ${{ secrets.GNOSISVPN_GPG_PRIVATE_KEY }}
