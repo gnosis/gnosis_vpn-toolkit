@@ -71,6 +71,7 @@ const MANIFEST_FILENAME: &str = "linux-arm64.json";
 pub enum Channel {
     Stable,
     Snapshot,
+    Experimental,
 }
 
 impl fmt::Display for Channel {
@@ -78,6 +79,7 @@ impl fmt::Display for Channel {
         match self {
             Channel::Stable => f.write_str("stable"),
             Channel::Snapshot => f.write_str("snapshot"),
+            Channel::Experimental => f.write_str("experimental"),
         }
     }
 }
@@ -93,6 +95,10 @@ pub struct Manifest {
 pub struct ManifestChannels {
     pub stable: Option<ChannelRelease>,
     pub snapshot: Option<ChannelRelease>,
+    /// The publisher omits this until the channel has built once, so it stays
+    /// optional like the others rather than being required.
+    #[serde(default)]
+    pub experimental: Option<ChannelRelease>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -122,6 +128,7 @@ impl Manifest {
         match channel {
             Channel::Stable => self.channels.stable.as_ref(),
             Channel::Snapshot => self.channels.snapshot.as_ref(),
+            Channel::Experimental => self.channels.experimental.as_ref(),
         }
     }
 }
@@ -132,7 +139,7 @@ impl Manifest {
 fn base_url(channel: Channel) -> &'static str {
     match channel {
         Channel::Stable => MANIFEST_BASE_URL_STABLE,
-        Channel::Snapshot => MANIFEST_BASE_URL_PRERELEASE,
+        Channel::Snapshot | Channel::Experimental => MANIFEST_BASE_URL_PRERELEASE,
     }
 }
 

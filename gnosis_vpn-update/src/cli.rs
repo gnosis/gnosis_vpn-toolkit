@@ -17,6 +17,7 @@ pub enum OutputFormat {
 pub enum ChannelArg {
     Stable,
     Snapshot,
+    Experimental,
 }
 
 impl From<ChannelArg> for Channel {
@@ -24,6 +25,7 @@ impl From<ChannelArg> for Channel {
         match value {
             ChannelArg::Stable => Channel::Stable,
             ChannelArg::Snapshot => Channel::Snapshot,
+            ChannelArg::Experimental => Channel::Experimental,
         }
     }
 }

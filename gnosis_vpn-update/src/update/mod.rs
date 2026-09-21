@@ -112,12 +112,17 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
 /// Infer which channel a version string was published on.
 ///
 /// Stable releases are plain dotted-numeric semver taken from the repo's
-/// `package.json` ("0.81.2"). Every other build line (snapshot, pr, commit)
-/// carries extra metadata — `+build.…`, `+pr.…`, `+commit.…` — and parts of
-/// the publishing pipeline slug the `+` to `-` for registries that reject it
-/// ("0.81.2-pr.305"), so the metadata separator cannot be relied on. Treat
-/// anything that is not purely digits-and-dots as a snapshot-line build.
+/// `package.json` ("0.81.2"). Experimental builds carry an `experimental`
+/// segment ("2026.09.20+build.144124.experimental"). Every other build line
+/// (snapshot, pr, commit) carries extra metadata — `+build.…`, `+pr.…`,
+/// `+commit.…` — and parts of the publishing pipeline slug the `+` to `-` for
+/// registries that reject it ("0.81.2-pr.305"), so the metadata separator
+/// cannot be relied on; match the segment, not the separator. Treat anything
+/// that is not purely digits-and-dots as a snapshot-line build.
 pub fn channel_of_version(version: &str) -> Channel {
+    if version.split(['.', '-', '+']).any(|part| part == EXPERIMENTAL_SEGMENT) {
+        return Channel::Experimental;
+    }
     let is_plain_release = !version.is_empty()
         && version
             .split('.')
@@ -129,6 +134,9 @@ pub fn channel_of_version(version: &str) -> Channel {
     }
 }
 
+/// The version segment the publishing pipeline appends to experimental builds.
+const EXPERIMENTAL_SEGMENT: &str = "experimental";
+
 /// Validate a candidate release against the currently installed app version.
 ///
 /// `current_app_version` is read from the installer-written version file
@@ -136,11 +144,11 @@ pub fn channel_of_version(version: &str) -> Channel {
 /// `allow_downgrade` is the explicit user override — without it,
 /// strictly-lower candidates are rejected.
 ///
-/// A cross-channel switch (stable ⇄ snapshot, detected by comparing
-/// `target_channel` against [`channel_of_version`] of the installed version)
-/// is always permitted: the two channels use incomparable version schemes
-/// (semver vs date+build), so the min-app / already-installed / downgrade
-/// gates only apply within a channel.
+/// A cross-channel switch (any of stable/snapshot/experimental to another,
+/// detected by comparing `target_channel` against [`channel_of_version`] of
+/// the installed version) is always permitted: the channels use incomparable
+/// version schemes (semver vs date+build), so the min-app / already-installed
+/// / downgrade gates only apply within a channel.
 ///
 /// The manifest's `min_os_version` field is **not** consulted here: the macOS
 /// `.pkg` postinstall surfaces an OS-too-old failure at install time if
@@ -322,6 +330,13 @@ fn write_channels(f: &mut std::fmt::Formatter<'_>, manifest: &manifest::Manifest
             f,
             "\nLatest Snapshot: {}, published at {}, download at: {}",
             snapshot.version, snapshot.published_at, snapshot.download_url
+        )?;
+    }
+    if let Some(experimental) = &manifest.channels.experimental {
+        write!(
+            f,
+            "\nLatest Experimental: {}, published at {}, download at: {}",
+            experimental.version, experimental.published_at, experimental.download_url
         )?;
     }
     Ok(())
@@ -963,7 +978,11 @@ mod tests {
         Manifest {
             schema_version: 1,
             generated_at: "2026-04-24T09:50:07Z".to_string(),
-            channels: ManifestChannels { stable, snapshot },
+            channels: ManifestChannels {
+                stable,
+                snapshot,
+                experimental: None,
+            },
         }
     }
 
@@ -1064,6 +1083,46 @@ mod tests {
         // Degenerate values must not be mistaken for a stable release.
         assert_eq!(channel_of_version(""), Channel::Snapshot);
         assert_eq!(channel_of_version("0..1"), Channel::Snapshot);
+    }
+
+    #[test]
+    fn channel_of_version_detects_experimental_builds() {
+        assert_eq!(
+            channel_of_version("2026.09.20+build.144124.experimental"),
+            Channel::Experimental,
+        );
+        // Registry-slugged form, and the `-experimental` spelling.
+        assert_eq!(
+            channel_of_version("2026.09.20-build.144124.experimental"),
+            Channel::Experimental,
+        );
+        assert_eq!(channel_of_version("0.95.0-experimental"), Channel::Experimental);
+        // A plain snapshot must not be mistaken for one.
+        assert_eq!(channel_of_version("2026.09.20+build.144124"), Channel::Snapshot);
+    }
+
+    #[test]
+    fn experimental_manifest_entry_is_picked_and_optional() {
+        // The publisher omits the key until the channel has built once.
+        let without: manifest::Manifest =
+            serde_json::from_value(serde_json::json!({
+                "schema_version": 1,
+                "generated_at": "2026-09-20T00:00:00Z",
+                "channels": { "stable": null, "snapshot": null },
+            }))
+            .expect("a manifest without the key must still parse");
+        assert!(without.pick(Channel::Experimental).is_none());
+
+        // Round-trip a populated entry through serde so the wire key is exercised.
+        let mut populated = manifest_with(None, None);
+        populated.channels.experimental = Some(release("2026.09.20+build.144124.experimental", "0.77.0", "14.0"));
+        let wire = serde_json::to_string(&populated).expect("serialize");
+        assert!(wire.contains("\"experimental\""), "the key must round-trip: {wire}");
+        let parsed: manifest::Manifest = serde_json::from_str(&wire).expect("reparse");
+        assert_eq!(
+            parsed.pick(Channel::Experimental).expect("experimental").version,
+            "2026.09.20+build.144124.experimental",
+        );
     }
 
     #[test]

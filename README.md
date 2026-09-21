@@ -27,7 +27,8 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
     `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
     was checked — the `--channel` value, or the channel inferred from the
     installed version. `manifest` is the update manifest exactly as fetched,
-    carrying **both** `channels.stable` and `channels.snapshot`, so one
+    carrying **every** channel entry — `channels.stable`,
+    `channels.snapshot` and `channels.experimental` — so one
     invocation yields the whole release picture as well as the decision; it is
     omitted on the three outcomes that never got a manifest
     (`VpnNotConnected`, `IntegrityError`, `Error`), where a consumer should
@@ -74,12 +75,13 @@ version is read from `/etc/gnosisvpn/version.txt`, the file the client
 installer writes; if it is missing or empty `update` and `check-update` fail
 (`version` reports `package_version: null` and still exits 0). The installed
 channel is inferred from that version string (a plain dotted-numeric version is
-a stable release; anything carrying build/pr/commit metadata — with `+` or its
+a stable release; one carrying an `experimental` segment is an experimental
+build; anything else carrying build/pr/commit metadata — with `+` or its
 registry-slugged `-` form — is a snapshot-line build) and is the default when
-`--channel` is omitted — a snapshot install stays on snapshot, a stable install
-stays on stable. Requesting the _other_
-channel explicitly is always offered/installed — switching stable ⇄ snapshot
-skips the newer-version gate, which only applies within the same channel.
+`--channel` is omitted, so an install stays on the channel it came from.
+Requesting a _different_ channel explicitly is always offered/installed —
+switching channels skips the newer-version gate, which only applies within the
+same channel.
 
 ### Where manifests come from
 
@@ -87,7 +89,8 @@ The **stable** manifest is read from the ENS/IPFS gateway at
 `https://download.vpn.gnosis.eth.limo/manifests/`, so a production update check
 does not depend on a single centrally-hosted origin. **Snapshot** reads
 `https://download.gnosisvpn.io/manifests/` directly — the IPFS mirror lags the
-origin by hours, and nightly builds need what was published minutes ago.
+origin by hours (and days on experimental), and nightly builds need what was
+published minutes ago. **Experimental** reads the origin for the same reason.
 
 Either way the plain `<platform>.json` is used, never the `.ipfs.json` variant
 (that one is stable-only and its `download_url`s are IPFS paths), so **artifacts
@@ -97,8 +100,10 @@ the manifest. Two consequences worth knowing:
 - The gateway rejects requests without a `User-Agent` (403) and answers more
   slowly than the origin, occasionally 504-ing on a cold cache.
 - A stable check returns the gateway's copy of the _whole_ manifest, so the
-  `snapshot` entry it reports can be a few hours behind. A snapshot check
-  reports the current one.
+  `snapshot` and `experimental` entries it reports can lag. A check on either
+  of those channels reports the current ones.
+- `channels.experimental` is absent until that channel has published once, so
+  consumers must treat it as optional rather than required.
 
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
