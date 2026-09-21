@@ -14,7 +14,12 @@ use gnosis_vpn_update::{logging, output};
 async fn main() {
     logging::setup();
     let cli = cli::parse();
-    let format = cli.output;
+    // `version` is read by a person at a terminal far more often than by the
+    // app, so it defaults to the labelled plain form; the rest stay NDJSON.
+    let format = cli.output.unwrap_or(match &cli.command {
+        Command::Version => OutputFormat::Plain,
+        _ => OutputFormat::Json,
+    });
 
     let code = match cli.command {
         Command::Version => {
@@ -57,22 +62,25 @@ fn build_client() -> Result<reqwest::Client, String> {
 
 fn print_version(format: OutputFormat) {
     let version = env!("CARGO_PKG_VERSION");
+    // A missing or empty version file is expected (client not installed), so it
+    // is reported rather than failing: the app calls this to probe the toolkit.
+    let package_version = installed_version()
+        .inspect_err(|e| tracing::debug!(error = %e, "no installed client version"))
+        .ok();
     match format {
-        OutputFormat::Json => {
-            // A missing or empty version file is expected (client not
-            // installed), so it reports as `null` rather than failing: the app
-            // calls this to probe whether the toolkit is present at all.
-            let package_version = installed_version()
-                .inspect_err(|e| tracing::debug!(error = %e, "no installed client version"))
-                .ok();
-            output::emit(&serde_json::json!({
-                "version": version,
-                "package_version": package_version,
-            }));
+        OutputFormat::Json => output::emit(&serde_json::json!({
+            "version": version,
+            "package_version": package_version,
+        })),
+        // Both lines on stdout: the version is this subcommand's output, not a
+        // diagnostic. Machine callers pass `--output json`.
+        OutputFormat::Plain => {
+            println!("Updater version: {version}");
+            println!(
+                "Package version: {}",
+                package_version.as_deref().unwrap_or("not installed")
+            );
         }
-        // Deliberately just the bare version: `self_update::finish` and the
-        // app's `get_toolkit_version` both capture this stdout whole.
-        OutputFormat::Plain => println!("{version}"),
     }
 }
 

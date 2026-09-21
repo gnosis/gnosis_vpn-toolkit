@@ -35,9 +35,10 @@ impl From<ChannelArg> for Channel {
 #[derive(Debug, Parser)]
 #[command(name = "gnosis_vpn-update", version, about, long_about = None)]
 pub struct Cli {
-    /// Output format for events emitted on stdout
-    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json, global = true)]
-    pub output: OutputFormat,
+    /// Output format for events emitted on stdout. Defaults to `json`, except
+    /// for `version`, which defaults to `plain`.
+    #[arg(short = 'o', long = "output", value_enum, global = true)]
+    pub output: Option<OutputFormat>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -55,7 +56,8 @@ pub enum Command {
     /// Check whether an update is available; prints one result on stdout.
     CheckUpdate(CheckArgs),
 
-    /// Print this toolkit's own version.
+    /// Print this toolkit's version and the installed package's. Human-readable
+    /// unless `--output json` is passed.
     Version,
 }
 

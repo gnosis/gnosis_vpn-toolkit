@@ -16,8 +16,9 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 
 ## Output contract
 
-- **stdout** carries the machine-readable protocol. With `--output json` (the
-  default) each line is one JSON value (newline-delimited JSON / NDJSON):
+- **stdout** carries the machine-readable protocol. With `--output json` — the
+  default for every subcommand except `version` — each line is one JSON value
+  (newline-delimited JSON / NDJSON):
   - `update` streams `UpdateStatus` events (`Checking`, `Downloading`,
     `Installing`, then a terminal `Completed` or `Failed`).
   - `check-update` prints a single result object
@@ -34,10 +35,17 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   - `version` prints `{"version": "…", "package_version": "…"}`, where
     `package_version` is the installed client version from
     `/etc/gnosisvpn/version.txt` (`null` when the client is not installed).
-    With `--output plain` it prints only the binary's own version.
     The JSON uses serde's externally-tagged enum encoding.
 - **stderr** carries human logs / diagnostics (`RUST_LOG`, default `info`), and
-  the human-readable output when `--output plain` is used.
+  the human-readable output when `--output plain` is used. `version` is the one
+  exception: it defaults to plain and writes those lines to stdout, because the
+  version is its output rather than a diagnostic.
+
+  ```console
+  $ gnosis_vpn-update version
+  Updater version: 0.4.0
+  Package version: 2026.06.06+build.000005
+  ```
 - **exit codes** follow `exitcode` conventions (`OK`, `NOPERM` for
   VPN-not-connected, `SOFTWARE` for integrity/verify failures, `UNAVAILABLE`
   otherwise). The structured reason is always in the stdout payload.
