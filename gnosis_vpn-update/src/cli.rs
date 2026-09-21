@@ -4,12 +4,11 @@ use std::path::PathBuf;
 use crate::manifest::Channel;
 use crate::vpn_status;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
-    /// Newline-delimited JSON on stdout (default) — consumed by gnosis_vpn-app.
-    #[default]
+    /// Newline-delimited JSON on stdout — what gnosis_vpn-app asks for.
     Json,
-    /// Human-readable status lines on stderr.
+    /// Human-readable lines on stdout (the default).
     Plain,
 }
 
@@ -32,13 +31,13 @@ impl From<ChannelArg> for Channel {
 
 /// Gnosis VPN toolkit — companion utilities for the Gnosis VPN client.
 ///
-/// Structured events are written to stdout (see --output); diagnostics go to
-/// stderr. Designed to be spawned by gnosis_vpn-app and driven over stdout.
+/// Results are written to stdout — human-readable by default, NDJSON with
+/// `--output json`, which is how gnosis_vpn-app drives it. stderr is logs.
 #[derive(Debug, Parser)]
 #[command(name = "gnosis_vpn-update", version, about, long_about = None)]
 pub struct Cli {
-    /// Output format for events emitted on stdout. Defaults to `json`, except
-    /// for `version`, which defaults to `plain`.
+    /// Output format for everything written to stdout. Defaults to `plain`;
+    /// machine consumers pass `json`.
     #[arg(short = 'o', long = "output", value_enum, global = true)]
     pub output: Option<OutputFormat>,
 

@@ -14,13 +14,10 @@ use gnosis_vpn_update::{logging, output};
 async fn main() {
     logging::setup();
     let cli = cli::parse();
-    // `version` and `check-update` are read by a person at a terminal far more
-    // often than by the app, so they default to the labelled plain form.
-    // `update` streams progress and stays NDJSON.
-    let format = cli.output.unwrap_or(match &cli.command {
-        Command::Version | Command::CheckUpdate(_) => OutputFormat::Plain,
-        _ => OutputFormat::Json,
-    });
+    // Every subcommand is read by a person at a terminal far more often than by
+    // the app, so plain is the default throughout; the app passes `--output
+    // json`. Either way the result goes to stdout and stderr stays logs.
+    let format = cli.output.unwrap_or(OutputFormat::Plain);
 
     let code = match cli.command {
         Command::Version => {
@@ -186,7 +183,7 @@ async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
 fn emit_status(format: OutputFormat, status: &UpdateStatus) {
     match format {
         OutputFormat::Json => output::emit(status),
-        OutputFormat::Plain => eprintln!("{status}"),
+        OutputFormat::Plain => println!("{status}"),
     }
 }
 
