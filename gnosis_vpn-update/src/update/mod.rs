@@ -1104,13 +1104,12 @@ mod tests {
     #[test]
     fn experimental_manifest_entry_is_picked_and_optional() {
         // The publisher omits the key until the channel has built once.
-        let without: manifest::Manifest =
-            serde_json::from_value(serde_json::json!({
-                "schema_version": 1,
-                "generated_at": "2026-09-20T00:00:00Z",
-                "channels": { "stable": null, "snapshot": null },
-            }))
-            .expect("a manifest without the key must still parse");
+        let without: manifest::Manifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-09-20T00:00:00Z",
+            "channels": { "stable": null, "snapshot": null },
+        }))
+        .expect("a manifest without the key must still parse");
         assert!(without.pick(Channel::Experimental).is_none());
 
         // Round-trip a populated entry through serde so the wire key is exercised.

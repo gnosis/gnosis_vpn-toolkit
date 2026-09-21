@@ -47,6 +47,7 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   Updater version: 0.4.0
   Package version: 2026.06.06+build.000005
   ```
+
 - **exit codes** follow `exitcode` conventions (`OK`, `NOPERM` for
   VPN-not-connected, `SOFTWARE` for integrity/verify failures, `UNAVAILABLE`
   otherwise). The structured reason is always in the stdout payload.
