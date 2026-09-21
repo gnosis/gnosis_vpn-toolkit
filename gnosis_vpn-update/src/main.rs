@@ -14,9 +14,8 @@ use gnosis_vpn_update::{logging, output};
 async fn main() {
     logging::setup();
     let cli = cli::parse();
-    // Every subcommand is read by a person at a terminal far more often than by
-    // the app, so plain is the default throughout; the app passes `--output
-    // json`. Either way the result goes to stdout and stderr stays logs.
+    // Plain throughout: the app passes `--output json`. Either format goes to
+    // stdout; stderr stays logs.
     let format = cli.output.unwrap_or(OutputFormat::Plain);
 
     let code = match cli.command {
@@ -42,11 +41,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// set one per request (see `manifest::REQUEST_TIMEOUT`).
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Sent on every request. Not cosmetic: the ENS gateway serving the stable
-/// manifest (`manifest::MANIFEST_BASE_URL_STABLE`) answers **403** to requests
-/// with no User-Agent, and reqwest sends none by default. Any non-empty value
-/// satisfies it. The request already rides the VPN tunnel and its path already
-/// names the platform, so naming the updater adds no meaningful fingerprint.
+/// Required, not cosmetic: the ENS gateway serving the stable manifest answers
+/// 403 without one, and reqwest sends none by default.
 const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 fn build_client() -> Result<reqwest::Client, String> {
@@ -116,9 +112,8 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
     exit_for_check(&result)
 }
 
-/// No install engine off macOS: refuse before reading the version file, opening
-/// the socket or fetching anything, and point at the apt commands the app's
-/// "How to update" modal shows.
+/// No install engine off macOS: refuse before touching the version file, the
+/// socket or the network, pointing at the apt commands instead.
 #[cfg(not(target_os = "macos"))]
 async fn run_update(format: OutputFormat, _args: cli::UpdateArgs) -> ExitCode {
     let status = UpdateStatus::Failed {

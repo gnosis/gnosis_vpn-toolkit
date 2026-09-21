@@ -32,11 +32,8 @@ use tokio::sync::mpsc;
 
 use crate::manifest::{self, Channel, ChannelRelease};
 
-/// What to tell someone who asks the updater to install on a platform with no
-/// install engine. The commands are copied verbatim from the app's "How to
-/// update" modal (`gnosis_vpn-app/src/components/common/HowToUpdateModal.tsx`),
-/// which in turn follows the installer repo's documented apt path — keep the
-/// three in step.
+/// Shown when there is no install engine. Copied from the app's "How to update"
+/// modal and the installer's apt path — keep the three in step.
 pub const MANUAL_UPDATE_HINT: &str = "Automatic updates are macOS-only. \
 Run the following in a terminal to update Gnosis VPN on Linux:\n\
 sudo apt-get update\n\
@@ -109,16 +106,8 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
-/// Infer which channel a version string was published on.
-///
-/// Stable releases are plain dotted-numeric semver taken from the repo's
-/// `package.json` ("0.81.2"). Experimental builds carry an `experimental`
-/// segment ("2026.09.20+build.144124.experimental"). Every other build line
-/// (snapshot, pr, commit) carries extra metadata — `+build.…`, `+pr.…`,
-/// `+commit.…` — and parts of the publishing pipeline slug the `+` to `-` for
-/// registries that reject it ("0.81.2-pr.305"), so the metadata separator
-/// cannot be relied on; match the segment, not the separator. Treat anything
-/// that is not purely digits-and-dots as a snapshot-line build.
+/// Infer the channel: plain dotted-numeric is stable, an `experimental` segment
+/// experimental, anything else snapshot. Match segments — `+` is slugged to `-`.
 pub fn channel_of_version(version: &str) -> Channel {
     if version.split(['.', '-', '+']).any(|part| part == EXPERIMENTAL_SEGMENT) {
         return Channel::Experimental;
@@ -137,22 +126,8 @@ pub fn channel_of_version(version: &str) -> Channel {
 /// The version segment the publishing pipeline appends to experimental builds.
 const EXPERIMENTAL_SEGMENT: &str = "experimental";
 
-/// Validate a candidate release against the currently installed app version.
-///
-/// `current_app_version` is read from the installer-written version file
-/// (see [`read_installed_version`]).
-/// `allow_downgrade` is the explicit user override — without it,
-/// strictly-lower candidates are rejected.
-///
-/// A cross-channel switch (any of stable/snapshot/experimental to another,
-/// detected by comparing `target_channel` against [`channel_of_version`] of
-/// the installed version) is always permitted: the channels use incomparable
-/// version schemes (semver vs date+build), so the min-app / already-installed
-/// / downgrade gates only apply within a channel.
-///
-/// The manifest's `min_os_version` field is **not** consulted here: the macOS
-/// `.pkg` postinstall surfaces an OS-too-old failure at install time if
-/// applicable.
+/// Validate a candidate release against the installed version. Cross-channel
+/// switches skip every gate (incomparable schemes); `min_os_version` is not read.
 pub fn ensure_installable(
     release: &ChannelRelease,
     current_app_version: &str,
@@ -271,15 +246,8 @@ pub enum CheckOutcome {
     Error(String),
 }
 
-/// Result of a `check-update` run — the single JSON object written to stdout.
-///
-/// `outcome` is the gated decision for `channel`; `manifest` is the manifest
-/// exactly as fetched — *both* channel entries, not just the resolved one — so
-/// `gnosis_vpn-app` gets the complete release picture and the decision from one
-/// invocation, instead of a second source for the release list. `manifest` is
-/// absent only when the fetch never produced one (`VpnNotConnected`,
-/// `IntegrityError`, `Error`); a consumer should then keep its last known
-/// manifest rather than clobber it.
+/// One `check-update` result. `manifest` carries every channel, and is absent only
+/// when the fetch produced none — a consumer should keep its last one then.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckResult {
     /// Channel that was checked: the `--channel` value, or the channel inferred
@@ -323,12 +291,8 @@ impl std::fmt::Display for CheckResult {
     }
 }
 
-/// Fetch the manifest and decide whether an update is available for `channel`,
-/// relative to `current_version`. Unless `force`, requires an active VPN
-/// connection (queried over the daemon socket).
-///
-/// The whole manifest rides along on every outcome that got as far as fetching
-/// one, so the caller can render both channels without a second round-trip.
+/// Decide whether `channel` has an update over `current_version`; needs the VPN
+/// unless `force`. The whole manifest rides along on every fetched outcome.
 pub async fn check(
     client: &Client,
     channel: Channel,
@@ -918,12 +882,8 @@ pub(crate) mod install_platform {
     }
 }
 
-/// Stand-in for platforms without an install engine.
-///
-/// The CLI refuses before the engine ever starts (see `run_update` in
-/// `main.rs`), so this is unreachable in practice; it exists because
-/// `drive_engine` calls `install_platform::install` unconditionally, and it
-/// returns the same guidance in case a future caller does reach it.
+/// Stand-in for platforms with no install engine: unreachable (the CLI refuses
+/// first), but `drive_engine` calls `install` unconditionally.
 #[cfg(not(target_os = "macos"))]
 pub(crate) mod install_platform {
     use std::path::Path;
@@ -1400,9 +1360,8 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
-        // Note: size_bytes does not survive the round-trip exactly (ByteSize
-        // renders "9.5 MiB" and parses back to 9961472), so only the channel
-        // structure is asserted here.
+        // size_bytes does not round-trip exactly (ByteSize renders "9.5 MiB"), so only
+        // the channel structure is asserted.
         let manifest = back.manifest.expect("manifest");
         assert!(manifest.channels.snapshot.is_some());
         assert_eq!(manifest.channels.stable.expect("stable").version, "0.78.0");

@@ -30,9 +30,7 @@ impl From<ChannelArg> for Channel {
 }
 
 /// Gnosis VPN toolkit — companion utilities for the Gnosis VPN client.
-///
-/// Results are written to stdout — human-readable by default, NDJSON with
-/// `--output json`, which is how gnosis_vpn-app drives it. stderr is logs.
+/// stdout carries the result (NDJSON with `--output json`); stderr is logs.
 #[derive(Debug, Parser)]
 #[command(name = "gnosis_vpn-update", version, about, long_about = None)]
 pub struct Cli {

@@ -33,21 +33,13 @@ impl fmt::Display for Hash {
 
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
 // const PUBLIC_KEY: &str = include_str!("../gnosisvpn-public-key.asc");
-/// Manifest host for the **stable** channel: the ENS/IPFS gateway, so a
-/// production update check does not depend on a single centrally-hosted
-/// origin. Only the manifest is fetched from here — this is deliberately the
-/// plain `<platform>.json` and not the `.ipfs.json` variant, so the artifact
-/// `download_url`s it carries still point at the GCS origin.
-///
-/// The gateway rejects requests with no `User-Agent` (403), so the shared
-/// client must set one — see `USER_AGENT` in `main.rs`. It is also slower and
-/// less reliable than the origin (multi-second responses, occasional 504 on a
-/// cold cache), which is what `REQUEST_TIMEOUT` has to absorb.
+
+/// Stable's manifest host: the ENS/IPFS gateway, so production does not depend on
+/// one origin. The plain `<platform>.json`, so `download_url`s still point at GCS.
 const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/manifests/";
 
-/// Manifest host for the pre-release channels. The IPFS mirror lags the origin
-/// by hours (snapshot) to days (experimental), and nightly builds need what was
-/// published minutes ago, so they read straight from GCS.
+/// Pre-release channels' manifest host: the mirror lags by hours (snapshot) to
+/// days (experimental), and nightly builds need what shipped minutes ago.
 const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
 /// Total per-request deadline for the small in-memory manifest/signature
@@ -145,9 +137,8 @@ impl Manifest {
     }
 }
 
-/// Which host to read the manifest from. Stable — the channel real users run —
-/// comes off the ENS/IPFS gateway; the pre-release channels come off the origin
-/// that publishes them.
+/// Which host to read from: stable off the gateway, the pre-release channels off
+/// the origin that publishes them.
 fn base_url(channel: Channel) -> &'static str {
     match channel {
         Channel::Stable => MANIFEST_BASE_URL_STABLE,
@@ -172,14 +163,8 @@ fn verify_and_parse(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest,
     serde_json::from_slice(manifest_bytes).map_err(|e| Error::Integrity(e.to_string()))
 }
 
-/// Download and verify the update manifest for the current platform.
-///
-/// `channel` selects the host only (see `base_url`); the manifest fetched
-/// carries every channel either way, so a cross-channel check still resolves.
-///
-/// The VPN-connected gate is *not* applied here — callers that want it must
-/// call [`crate::vpn_status::ensure_connected`] first (see the `update` and
-/// `check-update` flows).
+/// Download and verify this platform's manifest; `channel` picks the host only,
+/// every channel rides along. VPN gating is the caller's (`ensure_connected`).
 pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Error> {
     let sig_filename = MANIFEST_FILENAME.replace(".json", ".json.asc");
     let base = url::Url::parse(base_url(channel)).map_err(|e| Error::Other(e.to_string()))?;
@@ -239,9 +224,8 @@ mod tests {
         assert!(!stable.version.is_empty(), "stable version should not be empty");
     }
 
-    /// Every fixture the publishing pipeline generates, regardless of the
-    /// platform this test binary was built for — the fixtures are read by name
-    /// and never go through `MANIFEST_FILENAME`.
+    /// Every fixture the pipeline generates, whatever platform this binary is —
+    /// they are read by name, never through `MANIFEST_FILENAME`.
     const ALL_FIXTURES: [&str; 3] = ["macos-arm64.json", "linux-amd64.json", "linux-arm64.json"];
 
     #[test]
