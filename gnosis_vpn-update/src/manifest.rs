@@ -74,6 +74,18 @@ pub enum Channel {
     Experimental,
 }
 
+impl Channel {
+    /// Title-case name for human-readable output; `Display` stays lowercase to
+    /// match the wire value.
+    pub fn title(self) -> &'static str {
+        match self {
+            Channel::Stable => "Stable",
+            Channel::Snapshot => "Snapshot",
+            Channel::Experimental => "Experimental",
+        }
+    }
+}
+
 impl fmt::Display for Channel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

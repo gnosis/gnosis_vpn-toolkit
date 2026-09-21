@@ -293,53 +293,34 @@ pub struct CheckResult {
 }
 
 impl std::fmt::Display for CheckResult {
+    /// The decision, the installed package version and the channel it was
+    /// checked on — plus the chosen channel's changelog when one is offered.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.outcome {
-            CheckOutcome::UpToDate { current } => {
-                write!(f, "Up to date (current {current}, channel {})", self.channel)?
+            CheckOutcome::Available { current, release } => {
+                writeln!(f, "Update needed to {}", release.version)?;
+                writeln!(f, "Current installed version: {current}")?;
+                write!(f, "Channel: {}", self.channel.title())?;
+                // Only stable carries notes today; an empty label reads as a bug.
+                let notes = release.release_notes.trim();
+                if !notes.is_empty() {
+                    write!(f, "\nChangelog: {notes}")?;
+                }
+                Ok(())
             }
-            CheckOutcome::Available { current, release } => write!(
-                f,
-                "Update available on {}: {} (current {current})",
-                self.channel, release.version
-            )?,
-            CheckOutcome::NoReleaseForChannel(channel) => write!(f, "No release for channel {channel}")?,
-            CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass")?,
-            CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}")?,
-            CheckOutcome::Error(e) => write!(f, "Error: {e}")?,
-        }
-        match &self.manifest {
-            Some(manifest) => write_channels(f, manifest),
-            None => Ok(()),
+            CheckOutcome::UpToDate { current } => {
+                writeln!(f, "Currently on latest version")?;
+                writeln!(f, "Current installed version: {current}")?;
+                write!(f, "Channel: {}", self.channel.title())
+            }
+            CheckOutcome::NoReleaseForChannel(channel) => {
+                write!(f, "No release published on {}", channel.title())
+            }
+            CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass"),
+            CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}"),
+            CheckOutcome::Error(e) => write!(f, "Error: {e}"),
         }
     }
-}
-
-/// One line per present channel, matching `gnosis_vpn-ctl check-update`'s plain
-/// output verbatim so the two CLIs read the same. Absent channels print nothing.
-fn write_channels(f: &mut std::fmt::Formatter<'_>, manifest: &manifest::Manifest) -> std::fmt::Result {
-    if let Some(stable) = &manifest.channels.stable {
-        write!(
-            f,
-            "\nStable: {}, published at {}, download at: {}",
-            stable.version, stable.published_at, stable.download_url
-        )?;
-    }
-    if let Some(snapshot) = &manifest.channels.snapshot {
-        write!(
-            f,
-            "\nLatest Snapshot: {}, published at {}, download at: {}",
-            snapshot.version, snapshot.published_at, snapshot.download_url
-        )?;
-    }
-    if let Some(experimental) = &manifest.channels.experimental {
-        write!(
-            f,
-            "\nLatest Experimental: {}, published at {}, download at: {}",
-            experimental.version, experimental.published_at, experimental.download_url
-        )?;
-    }
-    Ok(())
 }
 
 /// Fetch the manifest and decide whether an update is available for `channel`,
@@ -1086,6 +1067,66 @@ mod tests {
     }
 
     #[test]
+    fn plain_check_lists_decision_version_channel_and_changelog() {
+        let mut rel = release("2026.09.20+build.144124.experimental", "0.77.0", "14.0");
+        rel.release_notes = "fixed the thing".to_string();
+        let r = CheckResult {
+            channel: Channel::Experimental,
+            outcome: CheckOutcome::Available {
+                current: "2026.06.06+build.000005".to_string(),
+                release: Box::new(rel),
+            },
+            manifest: None,
+        };
+        assert_eq!(
+            r.to_string(),
+            "Update needed to 2026.09.20+build.144124.experimental\n\
+             Current installed version: 2026.06.06+build.000005\n\
+             Channel: Experimental\n\
+             Changelog: fixed the thing",
+        );
+    }
+
+    #[test]
+    fn plain_check_omits_an_empty_changelog() {
+        // Snapshot and experimental releases ship empty notes; a bare
+        // "Changelog:" line would read as a bug.
+        let r = CheckResult {
+            channel: Channel::Snapshot,
+            outcome: CheckOutcome::Available {
+                current: "2026.06.06+build.000005".to_string(),
+                release: Box::new(release("2026.09.20+build.012829", "0.77.0", "14.0")),
+            },
+            manifest: None,
+        };
+        assert!(!r.to_string().contains("Changelog"), "got: {r}");
+    }
+
+    #[test]
+    fn plain_check_up_to_date_and_other_outcomes() {
+        let up_to_date = CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::UpToDate {
+                current: "0.95.0".to_string(),
+            },
+            manifest: None,
+        };
+        assert_eq!(
+            up_to_date.to_string(),
+            "Currently on latest version\n\
+             Current installed version: 0.95.0\n\
+             Channel: Stable",
+        );
+
+        let no_release = CheckResult {
+            channel: Channel::Experimental,
+            outcome: CheckOutcome::NoReleaseForChannel(Channel::Experimental),
+            manifest: None,
+        };
+        assert_eq!(no_release.to_string(), "No release published on Experimental");
+    }
+
+    #[test]
     fn channel_of_version_detects_experimental_builds() {
         assert_eq!(
             channel_of_version("2026.09.20+build.144124.experimental"),
@@ -1368,31 +1409,17 @@ mod tests {
     }
 
     #[test]
-    fn check_result_display_lists_both_channels() {
+    fn plain_check_reports_only_the_chosen_channel() {
+        // `available_result` carries entries for other channels; the rendering
+        // describes the checked one only, never the whole manifest.
         let rendered = available_result().to_string();
-        let lines: Vec<_> = rendered.lines().collect();
-        assert_eq!(lines.len(), 3, "expected verdict + 2 channel lines: {rendered}");
-        assert!(lines[0].starts_with("Update available on stable: 0.78.0"), "{rendered}");
-        assert!(lines[1].starts_with("Stable: 0.78.0, published at "), "{rendered}");
-        assert!(
-            lines[2].starts_with("Latest Snapshot: 2026.04.24+build.030921, published at "),
-            "{rendered}"
+        assert_eq!(
+            rendered,
+            "Update needed to 0.78.0\n\
+             Current installed version: 0.77.0\n\
+             Channel: Stable",
         );
-    }
-
-    #[test]
-    fn check_result_display_omits_absent_channels() {
-        let result = CheckResult {
-            channel: Channel::Stable,
-            outcome: CheckOutcome::UpToDate {
-                current: "0.78.0".to_string(),
-            },
-            manifest: Some(manifest_with(Some(release("0.78.0", "0.77.0", "14.0")), None)),
-        };
-        let rendered = result.to_string();
-        let lines: Vec<_> = rendered.lines().collect();
-        assert_eq!(lines.len(), 2, "{rendered}");
-        assert!(!rendered.contains("Latest Snapshot"), "{rendered}");
+        assert!(!rendered.contains("2026.04.24+build.030921"), "{rendered}");
     }
 
     #[test]
