@@ -18,11 +18,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    advisory-db = {
-      url = "github:rustsec/advisory-db";
-      flake = false;
-    };
-
     # HOPR Nix Library (provides reusable Rust build functions and treefmt config)
     nix-lib = {
       url = "github:hoprnet/nix-lib";
@@ -39,7 +34,6 @@
       nixpkgs,
       rust-overlay,
       crane,
-      advisory-db,
       pre-commit,
       nix-lib,
       ...
@@ -89,7 +83,6 @@
               nixLib
               self
               craneLib
-              advisory-db
               ;
           };
 
@@ -128,10 +121,11 @@
               toolkit-clippy
               toolkit-docs
               toolkit-test
-              toolkit-audit
               toolkit-licenses
               ;
           };
+
+          apps.audit = nixLib.mkAuditApp { rustToolchainFile = ./rust-toolchain.toml; };
 
           packages = lib.optionalAttrs isDarwin {
             inherit (toolkitPackages)

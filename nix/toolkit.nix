@@ -13,7 +13,6 @@
   nixLib,
   self,
   craneLib,
-  advisory-db,
 }:
 
 let
@@ -56,12 +55,11 @@ let
       inherit fs;
       root = ../.;
     };
-    # Includes audit and license config files needed by crane-based checks
+    # deny.toml for the cargoDeny license check
     checks = nixLib.mkSrc {
       inherit fs;
       root = ../.;
       extraFiles = [
-        ../.cargo/audit.toml
         ../deny.toml
       ];
     };
@@ -161,12 +159,6 @@ in
       buildDocs = true;
     }
   );
-
-  # Audit dependencies
-  toolkit-audit = craneLib.cargoAudit {
-    src = sources.checks;
-    inherit advisory-db;
-  };
 
   # Audit licenses
   toolkit-licenses = craneLib.cargoDeny {

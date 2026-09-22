@@ -64,12 +64,20 @@ jobs:
   checks:
     name: Checks
     if: ${{ github.event.pull_request.head.repo.fork == false }}
-    runs-on: depot-macos-15
-    steps:
-      - name: Run checks
-        uses: hoprnet/hopr-workflows/actions/nix-action@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # nix-action-v1
-        with:
-          source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
-          cachix_cache_name: gnosis-vpn-toolkit
-          cachix_auth_token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          command: nix flake check -L --show-trace --max-jobs 1
+    permissions:
+      contents: read
+    uses: hoprnet/hopr-workflows/.github/workflows/checks.yaml@1476429c0d8c5a6331c50a4655501125051cdbf4 # workflow-checks-v2.1.2
+    with:
+      source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+      cachix_cache_name: gnosis-vpn-toolkit
+      # The flake only exposes checks for aarch64-darwin, so every leg needs the mac runner.
+      runner_small: depot-macos-15
+      runner_large: depot-macos-15
+      # No `.#check` app or `.#ci` devshell here; `nix flake check` already covers clippy/docs/test/licenses.
+      format: false
+      pre_commit: false
+      deps: false
+      lint_command: nix flake check -L --show-trace --max-jobs 1
+      audit_command: nix run -L .#audit
+    secrets:
+      cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
