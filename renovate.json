@@ -8,6 +8,10 @@
   "minimumReleaseAge": "14 days",
   "vulnerabilityAlerts": { "enabled": true },
   "nix": { "enabled": true },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"]
+  },
   "packageRules": [
     {
       "matchManagers": ["github-actions"],

@@ -81,3 +81,16 @@ jobs:
           cachix_cache_name: gnosis-vpn-toolkit
           cachix_auth_token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           command: nix flake check -L --show-trace --max-jobs 1
+  audit:
+    name: Audit
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    runs-on: depot-ubuntu-22.04-4
+    steps:
+      # Its own job: the DB is fetched live, so a new RUSTSEC reddens this with no PR change.
+      - name: Run cargo audit
+        uses: hoprnet/hopr-workflows/actions/nix-action@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # nix-action-v1
+        with:
+          source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+          cachix_cache_name: gnosis-vpn-toolkit
+          cachix_auth_token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          command: nix run -L .#audit
