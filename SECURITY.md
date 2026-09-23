@@ -97,8 +97,19 @@ gnosis_vpn-update-aarch64-darwin: OK
 
 ### Verify Code Signature
 
+GnosisVPN binaries are signed with:
+
+**Signing identity:** `Developer ID Application: Gnosis Ltd. (ZKG876RKJ8)`
+
+**Team ID:** `ZKG876RKJ8`
+
+`codesign --verify` alone only proves the signature is intact — any binary signed
+with any Apple Developer certificate passes it. Pin the expected Team ID:
+
 ```bash
-codesign --verify --strict --verbose=2 gnosis_vpn-update-aarch64-darwin
+codesign --verify --strict --verbose=2 \
+  -R '=anchor apple generic and certificate leaf[subject.OU] = "ZKG876RKJ8"' \
+  gnosis_vpn-update-aarch64-darwin
 ```
 
 Expected output:
@@ -106,9 +117,11 @@ Expected output:
 ```
 gnosis_vpn-update-aarch64-darwin: valid on disk
 gnosis_vpn-update-aarch64-darwin: satisfies its Designated Requirement
+gnosis_vpn-update-aarch64-darwin: explicit requirement satisfied
 ```
 
-Inspect the signing identity with `codesign --display --verbose=4 <binary>`.
+`codesign --display --verbose=4 <binary>` prints the full chain; its `Authority=`
+line must name the signing identity above.
 
 ### Clearing the Quarantine Attribute
 
