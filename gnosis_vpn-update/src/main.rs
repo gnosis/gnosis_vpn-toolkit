@@ -4,14 +4,19 @@ use std::time::Duration;
 use exitcode::{self, ExitCode};
 
 use gnosis_vpn_update::cli::{self, Command, OutputFormat};
-use gnosis_vpn_update::update::{self, CheckOutcome, EngineInput, UpdateStage, UpdateStatus};
+use gnosis_vpn_update::manifest::Channel;
+#[cfg(target_os = "macos")]
+use gnosis_vpn_update::update::EngineInput;
+use gnosis_vpn_update::update::{self, CheckOutcome, CheckResult, UpdateStage, UpdateStatus};
 use gnosis_vpn_update::{logging, output};
 
 #[tokio::main]
 async fn main() {
     logging::setup();
     let cli = cli::parse();
-    let format = cli.output;
+    // Plain throughout: the app passes `--output json`. Either format goes to
+    // stdout; stderr stays logs.
+    let format = cli.output.unwrap_or(OutputFormat::Plain);
 
     let code = match cli.command {
         Command::Version => {
@@ -36,8 +41,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// set one per request (see `manifest::REQUEST_TIMEOUT`).
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Required, not cosmetic: the ENS gateway serving the stable manifest answers
+/// 403 without one, and reqwest sends none by default.
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(READ_TIMEOUT)
         .build()
@@ -46,9 +56,25 @@ fn build_client() -> Result<reqwest::Client, String> {
 
 fn print_version(format: OutputFormat) {
     let version = env!("CARGO_PKG_VERSION");
+    // A missing or empty version file is expected (client not installed), so it
+    // is reported rather than failing: the app calls this to probe the toolkit.
+    let package_version = installed_version()
+        .inspect_err(|e| tracing::debug!(error = %e, "no installed client version"))
+        .ok();
     match format {
-        OutputFormat::Json => output::emit(&serde_json::json!({ "version": version })),
-        OutputFormat::Plain => println!("{version}"),
+        OutputFormat::Json => output::emit(&serde_json::json!({
+            "version": version,
+            "package_version": package_version,
+        })),
+        // Both lines on stdout: the version is this subcommand's output, not a
+        // diagnostic. Machine callers pass `--output json`.
+        OutputFormat::Plain => {
+            println!("Updater version: {version}");
+            println!(
+                "Package version: {}",
+                package_version.as_deref().unwrap_or("not installed")
+            );
+        }
     }
 }
 
@@ -59,7 +85,7 @@ fn installed_version() -> Result<String, String> {
 }
 
 async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
-    let outcome = match (installed_version(), build_client()) {
+    let result = match (installed_version(), build_client()) {
         (Ok(current_version), Ok(client)) => {
             // No --channel: stay on the channel the installed version came from.
             let channel = match args.channel {
@@ -68,16 +94,37 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
             };
             update::check(&client, channel, &current_version, &args.socket_path, args.force).await
         }
-        (Err(e), _) | (_, Err(e)) => CheckOutcome::Error(e),
+        // Without an installed version the channel cannot be inferred; fall
+        // back to whatever was asked for. The outcome is an error either way.
+        (Err(e), _) | (_, Err(e)) => CheckResult {
+            channel: args.channel.map(Into::into).unwrap_or(Channel::Stable),
+            outcome: CheckOutcome::Error(e),
+            manifest: None,
+        },
     };
 
     match format {
-        OutputFormat::Json => output::emit(&outcome),
-        OutputFormat::Plain => eprintln!("{}", check_summary(&outcome)),
+        OutputFormat::Json => output::emit(&result),
+        // stdout, like `version`: this is the subcommand's output, not a
+        // diagnostic. Machine callers pass `--output json`.
+        OutputFormat::Plain => println!("{result}"),
     }
-    exit_for_check(&outcome)
+    exit_for_check(&result)
 }
 
+/// No install engine off macOS: refuse before touching the version file, the
+/// socket or the network, pointing at the apt commands instead.
+#[cfg(not(target_os = "macos"))]
+async fn run_update(format: OutputFormat, _args: cli::UpdateArgs) -> ExitCode {
+    let status = UpdateStatus::Failed {
+        stage: UpdateStage::Install,
+        error: update::MANUAL_UPDATE_HINT.to_string(),
+    };
+    emit_status(format, &status);
+    exit_for_update(&status)
+}
+
+#[cfg(target_os = "macos")]
 async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
     let (current_app_version, client) = match installed_version().and_then(|v| build_client().map(|c| (v, c))) {
         Ok(pair) => pair,
@@ -131,25 +178,12 @@ async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
 fn emit_status(format: OutputFormat, status: &UpdateStatus) {
     match format {
         OutputFormat::Json => output::emit(status),
-        OutputFormat::Plain => eprintln!("{status}"),
+        OutputFormat::Plain => println!("{status}"),
     }
 }
 
-fn check_summary(outcome: &CheckOutcome) -> String {
-    match outcome {
-        CheckOutcome::UpToDate { current } => format!("Up to date (current {current})"),
-        CheckOutcome::Available { current, release } => {
-            format!("Update available: {} (current {current})", release.version)
-        }
-        CheckOutcome::NoReleaseForChannel(channel) => format!("No release for channel {channel}"),
-        CheckOutcome::VpnNotConnected => "VPN not connected — pass --force to bypass".to_string(),
-        CheckOutcome::IntegrityError(e) => format!("Integrity error: {e}"),
-        CheckOutcome::Error(e) => format!("Error: {e}"),
-    }
-}
-
-fn exit_for_check(outcome: &CheckOutcome) -> ExitCode {
-    match outcome {
+fn exit_for_check(result: &CheckResult) -> ExitCode {
+    match &result.outcome {
         CheckOutcome::UpToDate { .. } | CheckOutcome::Available { .. } => exitcode::OK,
         CheckOutcome::NoReleaseForChannel(_) => exitcode::UNAVAILABLE,
         CheckOutcome::VpnNotConnected => exitcode::NOPERM,

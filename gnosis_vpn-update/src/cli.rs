@@ -4,12 +4,11 @@ use std::path::PathBuf;
 use crate::manifest::Channel;
 use crate::vpn_status;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
-    /// Newline-delimited JSON on stdout (default) — consumed by gnosis_vpn-app.
-    #[default]
+    /// Newline-delimited JSON on stdout — what gnosis_vpn-app asks for.
     Json,
-    /// Human-readable status lines on stderr.
+    /// Human-readable lines on stdout (the default).
     Plain,
 }
 
@@ -17,6 +16,7 @@ pub enum OutputFormat {
 pub enum ChannelArg {
     Stable,
     Snapshot,
+    Experimental,
 }
 
 impl From<ChannelArg> for Channel {
@@ -24,20 +24,20 @@ impl From<ChannelArg> for Channel {
         match value {
             ChannelArg::Stable => Channel::Stable,
             ChannelArg::Snapshot => Channel::Snapshot,
+            ChannelArg::Experimental => Channel::Experimental,
         }
     }
 }
 
 /// Gnosis VPN toolkit — companion utilities for the Gnosis VPN client.
-///
-/// Structured events are written to stdout (see --output); diagnostics go to
-/// stderr. Designed to be spawned by gnosis_vpn-app and driven over stdout.
+/// stdout carries the result (NDJSON with `--output json`); stderr is logs.
 #[derive(Debug, Parser)]
 #[command(name = "gnosis_vpn-update", version, about, long_about = None)]
 pub struct Cli {
-    /// Output format for events emitted on stdout
-    #[arg(short = 'o', long = "output", value_enum, default_value_t = OutputFormat::Json, global = true)]
-    pub output: OutputFormat,
+    /// Output format for everything written to stdout. Defaults to `plain`;
+    /// machine consumers pass `json`.
+    #[arg(short = 'o', long = "output", value_enum, global = true)]
+    pub output: Option<OutputFormat>,
 
     #[command(subcommand)]
     pub command: Command,
@@ -55,7 +55,8 @@ pub enum Command {
     /// Check whether an update is available; prints one result on stdout.
     CheckUpdate(CheckArgs),
 
-    /// Print this toolkit's own version.
+    /// Print this toolkit's version and the installed package's. Human-readable
+    /// unless `--output json` is passed.
     Version,
 }
 

@@ -32,6 +32,13 @@ use tokio::sync::mpsc;
 
 use crate::manifest::{self, Channel, ChannelRelease};
 
+/// Shown when there is no install engine. Copied from the app's "How to update"
+/// modal and the installer's apt path — keep the three in step.
+pub const MANUAL_UPDATE_HINT: &str = "Automatic updates are macOS-only. \
+Run the following in a terminal to update Gnosis VPN on Linux:\n\
+sudo apt-get update\n\
+sudo apt-get install -y gnosisvpn";
+
 /// Install-gate failure modes — distinct from `manifest::Error`, which covers
 /// the manifest-fetch path. These are the rejection reasons that apply *after*
 /// a manifest is in hand and we're deciding whether a specific `ChannelRelease`
@@ -99,15 +106,12 @@ pub fn compare_components(a: &str, b: &str) -> Ordering {
     Ordering::Equal
 }
 
-/// Infer which channel a version string was published on.
-///
-/// Stable releases are plain dotted-numeric semver taken from the repo's
-/// `package.json` ("0.81.2"). Every other build line (snapshot, pr, commit)
-/// carries extra metadata — `+build.…`, `+pr.…`, `+commit.…` — and parts of
-/// the publishing pipeline slug the `+` to `-` for registries that reject it
-/// ("0.81.2-pr.305"), so the metadata separator cannot be relied on. Treat
-/// anything that is not purely digits-and-dots as a snapshot-line build.
+/// Infer the channel: plain dotted-numeric is stable, an `experimental` segment
+/// experimental, anything else snapshot. Match segments — `+` is slugged to `-`.
 pub fn channel_of_version(version: &str) -> Channel {
+    if version.split(['.', '-', '+']).any(|part| part == EXPERIMENTAL_SEGMENT) {
+        return Channel::Experimental;
+    }
     let is_plain_release = !version.is_empty()
         && version
             .split('.')
@@ -119,22 +123,11 @@ pub fn channel_of_version(version: &str) -> Channel {
     }
 }
 
-/// Validate a candidate release against the currently installed app version.
-///
-/// `current_app_version` is read from the installer-written version file
-/// (see [`read_installed_version`]).
-/// `allow_downgrade` is the explicit user override — without it,
-/// strictly-lower candidates are rejected.
-///
-/// A cross-channel switch (stable ⇄ snapshot, detected by comparing
-/// `target_channel` against [`channel_of_version`] of the installed version)
-/// is always permitted: the two channels use incomparable version schemes
-/// (semver vs date+build), so the min-app / already-installed / downgrade
-/// gates only apply within a channel.
-///
-/// The manifest's `min_os_version` field is **not** consulted here: the macOS
-/// `.pkg` postinstall surfaces an OS-too-old failure at install time if
-/// applicable.
+/// The version segment the publishing pipeline appends to experimental builds.
+const EXPERIMENTAL_SEGMENT: &str = "experimental";
+
+/// Validate a candidate release against the installed version. Cross-channel
+/// switches skip every gate (incomparable schemes); `min_os_version` is not read.
 pub fn ensure_installable(
     release: &ChannelRelease,
     current_app_version: &str,
@@ -236,9 +229,8 @@ impl std::fmt::Display for UpdateStatus {
     }
 }
 
-/// Result of a `check-update` run. Serialized as a single JSON object to
-/// stdout. Mirrors the client's `CheckUpdateResponse` so the app's parsing is
-/// unchanged.
+/// The gated decision a `check-update` run arrived at, carried inside
+/// [`CheckResult`]. Serialized with serde's externally-tagged encoding.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum CheckOutcome {
     UpToDate {
@@ -254,39 +246,98 @@ pub enum CheckOutcome {
     Error(String),
 }
 
-/// Fetch the manifest and decide whether an update is available for `channel`,
-/// relative to `current_version`. Unless `force`, requires an active VPN
-/// connection (queried over the daemon socket).
+/// One `check-update` result. `manifest` carries every channel, and is absent only
+/// when the fetch produced none — a consumer should keep its last one then.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CheckResult {
+    /// Channel that was checked: the `--channel` value, or the channel inferred
+    /// from the installed version (see [`channel_of_version`]).
+    pub channel: Channel,
+    pub outcome: CheckOutcome,
+    /// `default` is required alongside `skip_serializing_if` so the type still
+    /// deserializes when the key is absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<manifest::Manifest>,
+}
+
+impl std::fmt::Display for CheckResult {
+    /// The decision, the installed package version and the channel it was
+    /// checked on — plus the chosen channel's changelog when one is offered.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.outcome {
+            CheckOutcome::Available { current, release } => {
+                writeln!(f, "Update needed to {}", release.version)?;
+                writeln!(f, "Current installed version: {current}")?;
+                write!(f, "Channel: {}", self.channel.title())?;
+                // Only stable carries notes today; an empty label reads as a bug.
+                let notes = release.release_notes.trim();
+                if !notes.is_empty() {
+                    write!(f, "\nChangelog: {notes}")?;
+                }
+                Ok(())
+            }
+            CheckOutcome::UpToDate { current } => {
+                writeln!(f, "Currently on latest version")?;
+                writeln!(f, "Current installed version: {current}")?;
+                write!(f, "Channel: {}", self.channel.title())
+            }
+            CheckOutcome::NoReleaseForChannel(channel) => {
+                write!(f, "No release published on {}", channel.title())
+            }
+            CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass"),
+            CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}"),
+            CheckOutcome::Error(e) => write!(f, "Error: {e}"),
+        }
+    }
+}
+
+/// Decide whether `channel` has an update over `current_version`; needs the VPN
+/// unless `force`. The whole manifest rides along on every fetched outcome.
 pub async fn check(
     client: &Client,
     channel: Channel,
     current_version: &str,
     socket_path: &std::path::Path,
     force: bool,
-) -> CheckOutcome {
+) -> CheckResult {
+    let bare = |outcome| CheckResult {
+        channel,
+        outcome,
+        manifest: None,
+    };
+
     if !force && crate::vpn_status::ensure_connected(socket_path).await.is_err() {
-        return CheckOutcome::VpnNotConnected;
+        return bare(CheckOutcome::VpnNotConnected);
     }
 
-    let manifest = match manifest::download(client).await {
+    let manifest = match manifest::download(client, channel).await {
         Ok(m) => m,
-        Err(manifest::Error::Integrity(msg)) => return CheckOutcome::IntegrityError(msg),
-        Err(e) => return CheckOutcome::Error(e.to_string()),
+        Err(manifest::Error::Integrity(msg)) => return bare(CheckOutcome::IntegrityError(msg)),
+        Err(e) => return bare(CheckOutcome::Error(e.to_string())),
     };
 
-    let Some(release) = manifest.pick(channel).cloned() else {
-        return CheckOutcome::NoReleaseForChannel(channel);
+    // `pick` borrows `manifest`; cloning the candidate ends that borrow so the
+    // whole manifest can be moved into the result below.
+    let outcome = match manifest.pick(channel).cloned() {
+        None => CheckOutcome::NoReleaseForChannel(channel),
+        Some(release) => match ensure_installable(&release, current_version, channel, false) {
+            Ok(_) => CheckOutcome::Available {
+                current: current_version.to_string(),
+                release: Box::new(release),
+            },
+            Err(GateError::AlreadyInstalled { .. }) | Err(GateError::Downgrade { .. }) => CheckOutcome::UpToDate {
+                current: current_version.to_string(),
+            },
+            // `AppTooOld` is the one post-fetch rejection still reported as a
+            // bare error; the manifest rides along regardless.
+            Err(e) => CheckOutcome::Error(e.to_string()),
+        },
     };
 
-    match ensure_installable(&release, current_version, channel, false) {
-        Ok(_) => CheckOutcome::Available {
-            current: current_version.to_string(),
-            release: Box::new(release),
-        },
-        Err(GateError::AlreadyInstalled { .. }) | Err(GateError::Downgrade { .. }) => CheckOutcome::UpToDate {
-            current: current_version.to_string(),
-        },
-        Err(e) => CheckOutcome::Error(e.to_string()),
+    CheckResult {
+        channel,
+        outcome,
+        manifest: Some(manifest),
     }
 }
 
@@ -369,7 +420,7 @@ async fn drive_engine(
             .await
             .map_err(|e| (UpdateStage::Check, e.to_string()))?;
     }
-    let manifest = manifest::download(&input.client)
+    let manifest = manifest::download(&input.client, input.channel)
         .await
         .map_err(|e| (UpdateStage::Check, e.to_string()))?;
 
@@ -831,10 +882,21 @@ pub(crate) mod install_platform {
     }
 }
 
+/// Stand-in for platforms with no install engine: unreachable (the CLI refuses
+/// first), but `drive_engine` calls `install` unconditionally.
+#[cfg(not(target_os = "macos"))]
+pub(crate) mod install_platform {
+    use std::path::Path;
+
+    pub async fn install(_path: &Path, _choice_changes: Option<&Path>) -> Result<(), String> {
+        Err(super::MANUAL_UPDATE_HINT.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifest::Hash;
+    use crate::manifest::{Hash, Manifest, ManifestChannels};
     use url::Url;
 
     fn release(version: &str, min_app: &str, min_os: &str) -> ChannelRelease {
@@ -849,6 +911,38 @@ mod tests {
             min_os_version: min_os.to_string(),
             min_app_version: min_app.to_string(),
         }
+    }
+
+    /// Named `manifest_with` rather than `manifest` so it does not read as
+    /// shadowing the `manifest` module.
+    fn manifest_with(stable: Option<ChannelRelease>, snapshot: Option<ChannelRelease>) -> Manifest {
+        Manifest {
+            schema_version: 1,
+            generated_at: "2026-04-24T09:50:07Z".to_string(),
+            channels: ManifestChannels {
+                stable,
+                snapshot,
+                experimental: None,
+            },
+        }
+    }
+
+    /// An `Available` result whose manifest holds a release on *both* channels.
+    fn available_result() -> CheckResult {
+        let stable = release("0.78.0", "0.77.0", "14.0");
+        let snapshot = release("2026.04.24+build.030921", "0.77.0", "14.0");
+        CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::Available {
+                current: "0.77.0".to_string(),
+                release: Box::new(stable.clone()),
+            },
+            manifest: Some(manifest_with(Some(stable), Some(snapshot))),
+        }
+    }
+
+    fn json_of(result: &CheckResult) -> serde_json::Value {
+        serde_json::to_value(result).expect("serialize CheckResult")
     }
 
     #[test]
@@ -930,6 +1024,105 @@ mod tests {
         // Degenerate values must not be mistaken for a stable release.
         assert_eq!(channel_of_version(""), Channel::Snapshot);
         assert_eq!(channel_of_version("0..1"), Channel::Snapshot);
+    }
+
+    #[test]
+    fn plain_check_lists_decision_version_channel_and_changelog() {
+        let mut rel = release("2026.09.20+build.144124.experimental", "0.77.0", "14.0");
+        rel.release_notes = "fixed the thing".to_string();
+        let r = CheckResult {
+            channel: Channel::Experimental,
+            outcome: CheckOutcome::Available {
+                current: "2026.06.06+build.000005".to_string(),
+                release: Box::new(rel),
+            },
+            manifest: None,
+        };
+        assert_eq!(
+            r.to_string(),
+            "Update needed to 2026.09.20+build.144124.experimental\n\
+             Current installed version: 2026.06.06+build.000005\n\
+             Channel: Experimental\n\
+             Changelog: fixed the thing",
+        );
+    }
+
+    #[test]
+    fn plain_check_omits_an_empty_changelog() {
+        // Snapshot and experimental releases ship empty notes; a bare
+        // "Changelog:" line would read as a bug.
+        let r = CheckResult {
+            channel: Channel::Snapshot,
+            outcome: CheckOutcome::Available {
+                current: "2026.06.06+build.000005".to_string(),
+                release: Box::new(release("2026.09.20+build.012829", "0.77.0", "14.0")),
+            },
+            manifest: None,
+        };
+        assert!(!r.to_string().contains("Changelog"), "got: {r}");
+    }
+
+    #[test]
+    fn plain_check_up_to_date_and_other_outcomes() {
+        let up_to_date = CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::UpToDate {
+                current: "0.95.0".to_string(),
+            },
+            manifest: None,
+        };
+        assert_eq!(
+            up_to_date.to_string(),
+            "Currently on latest version\n\
+             Current installed version: 0.95.0\n\
+             Channel: Stable",
+        );
+
+        let no_release = CheckResult {
+            channel: Channel::Experimental,
+            outcome: CheckOutcome::NoReleaseForChannel(Channel::Experimental),
+            manifest: None,
+        };
+        assert_eq!(no_release.to_string(), "No release published on Experimental");
+    }
+
+    #[test]
+    fn channel_of_version_detects_experimental_builds() {
+        assert_eq!(
+            channel_of_version("2026.09.20+build.144124.experimental"),
+            Channel::Experimental,
+        );
+        // Registry-slugged form, and the `-experimental` spelling.
+        assert_eq!(
+            channel_of_version("2026.09.20-build.144124.experimental"),
+            Channel::Experimental,
+        );
+        assert_eq!(channel_of_version("0.95.0-experimental"), Channel::Experimental);
+        // A plain snapshot must not be mistaken for one.
+        assert_eq!(channel_of_version("2026.09.20+build.144124"), Channel::Snapshot);
+    }
+
+    #[test]
+    fn experimental_manifest_entry_is_picked_and_optional() {
+        // The publisher omits the key until the channel has built once.
+        let without: manifest::Manifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "generated_at": "2026-09-20T00:00:00Z",
+            "channels": { "stable": null, "snapshot": null },
+        }))
+        .expect("a manifest without the key must still parse");
+        assert!(without.pick(Channel::Experimental).is_none());
+
+        // Round-trip a populated entry through serde so the wire key is exercised.
+        let mut populated = manifest_with(None, None);
+        populated.channels.experimental = Some(release("2026.09.20+build.144124.experimental", "0.77.0", "14.0"));
+        let wire = serde_json::to_string(&populated).expect("serialize");
+        assert!(wire.contains("\"experimental\""), "the key must round-trip: {wire}");
+        let parsed: manifest::Manifest = serde_json::from_str(&wire).expect("reparse");
+        assert_eq!(
+            parsed.pick(Channel::Experimental).expect("experimental").version,
+            "2026.09.20+build.144124.experimental",
+        );
     }
 
     #[test]
@@ -1070,5 +1263,145 @@ mod tests {
         for url in bad {
             assert_eq!(safe_artifact_filename(&Url::parse(url).unwrap()), None, "url={url}");
         }
+    }
+
+    #[test]
+    fn check_result_carries_channel_and_both_manifest_channels() {
+        let v = json_of(&available_result());
+
+        let mut keys: Vec<_> = v.as_object().expect("object").keys().cloned().collect();
+        keys.sort();
+        assert_eq!(keys, ["channel", "manifest", "outcome"]);
+        assert_eq!(v["channel"], "stable");
+
+        // The whole point of carrying the manifest: the channel that was *not*
+        // resolved is on the wire too.
+        assert_eq!(v["manifest"]["schema_version"], 1);
+        assert_eq!(v["manifest"]["generated_at"], "2026-04-24T09:50:07Z");
+        assert_eq!(
+            v["manifest"]["channels"]["snapshot"]["version"],
+            "2026.04.24+build.030921"
+        );
+        assert_eq!(
+            v["outcome"]["Available"]["release"]["version"],
+            v["manifest"]["channels"]["stable"]["version"]
+        );
+
+        // ByteSize serializes human-readable; the app's schema expects a string.
+        assert!(v["manifest"]["channels"]["stable"]["size_bytes"].is_string());
+    }
+
+    #[test]
+    fn check_result_manifest_survives_up_to_date_and_no_release() {
+        let stable = release("0.78.0", "0.77.0", "14.0");
+        let snapshot = release("2026.04.24+build.030921", "0.77.0", "14.0");
+
+        let up_to_date = CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::UpToDate {
+                current: "0.78.0".to_string(),
+            },
+            manifest: Some(manifest_with(Some(stable.clone()), Some(snapshot))),
+        };
+        let v = json_of(&up_to_date);
+        assert_eq!(v["outcome"]["UpToDate"]["current"], "0.78.0");
+        assert_eq!(
+            v["manifest"]["channels"]["snapshot"]["version"],
+            "2026.04.24+build.030921"
+        );
+
+        // An empty channel still fetched a manifest, so it still reports one.
+        let no_release = CheckResult {
+            channel: Channel::Snapshot,
+            outcome: CheckOutcome::NoReleaseForChannel(Channel::Snapshot),
+            manifest: Some(manifest_with(Some(stable), None)),
+        };
+        let v = json_of(&no_release);
+        assert_eq!(v["channel"], "snapshot");
+        assert_eq!(v["outcome"]["NoReleaseForChannel"], "snapshot");
+        assert!(v["manifest"]["channels"]["stable"].is_object());
+        assert!(v["manifest"]["channels"]["snapshot"].is_null());
+    }
+
+    #[test]
+    fn check_result_omits_manifest_when_fetch_failed() {
+        for outcome in [
+            CheckOutcome::VpnNotConnected,
+            CheckOutcome::IntegrityError("boom".to_string()),
+            CheckOutcome::Error("boom".to_string()),
+        ] {
+            let v = json_of(&CheckResult {
+                channel: Channel::Stable,
+                outcome,
+                manifest: None,
+            });
+            assert!(v.get("manifest").is_none(), "manifest key should be absent: {v}");
+        }
+
+        // The outcome variants keep the shapes they had before `CheckResult`.
+        let v = json_of(&CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::VpnNotConnected,
+            manifest: None,
+        });
+        assert_eq!(v["outcome"], "VpnNotConnected");
+    }
+
+    #[test]
+    fn check_result_roundtrips_through_json() {
+        let json = serde_json::to_string(&available_result()).expect("ser");
+        let back: CheckResult = serde_json::from_str(&json).expect("de");
+
+        assert_eq!(back.channel, Channel::Stable);
+        match back.outcome {
+            CheckOutcome::Available { current, release } => {
+                assert_eq!(current, "0.77.0");
+                assert_eq!(release.version, "0.78.0");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // size_bytes does not round-trip exactly (ByteSize renders "9.5 MiB"), so only
+        // the channel structure is asserted.
+        let manifest = back.manifest.expect("manifest");
+        assert!(manifest.channels.snapshot.is_some());
+        assert_eq!(manifest.channels.stable.expect("stable").version, "0.78.0");
+    }
+
+    #[test]
+    fn plain_check_reports_only_the_chosen_channel() {
+        // `available_result` carries entries for other channels; the rendering
+        // describes the checked one only, never the whole manifest.
+        let rendered = available_result().to_string();
+        assert_eq!(
+            rendered,
+            "Update needed to 0.78.0\n\
+             Current installed version: 0.77.0\n\
+             Channel: Stable",
+        );
+        assert!(!rendered.contains("2026.04.24+build.030921"), "{rendered}");
+    }
+
+    #[test]
+    fn check_result_display_is_one_line_without_a_manifest() {
+        for outcome in [
+            CheckOutcome::VpnNotConnected,
+            CheckOutcome::IntegrityError("boom".to_string()),
+            CheckOutcome::Error("boom".to_string()),
+        ] {
+            let rendered = CheckResult {
+                channel: Channel::Stable,
+                outcome,
+                manifest: None,
+            }
+            .to_string();
+            assert_eq!(rendered.lines().count(), 1, "{rendered}");
+        }
+    }
+
+    #[test]
+    fn manual_update_hint_matches_the_app_modal() {
+        // Keep in step with gnosis_vpn-app's HowToUpdateModal.tsx.
+        assert!(MANUAL_UPDATE_HINT.contains("sudo apt-get update"));
+        assert!(MANUAL_UPDATE_HINT.contains("sudo apt-get install -y gnosisvpn"));
     }
 }

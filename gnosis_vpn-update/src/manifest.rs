@@ -33,7 +33,14 @@ impl fmt::Display for Hash {
 
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
 // const PUBLIC_KEY: &str = include_str!("../gnosisvpn-public-key.asc");
-const MANIFEST_BASE_URL: &str = "https://download.gnosisvpn.io/manifests/";
+
+/// Stable's manifest host: the ENS/IPFS gateway, so production does not depend on
+/// one origin. The plain `<platform>.json`, so `download_url`s still point at GCS.
+const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/manifests/";
+
+/// Pre-release channels' manifest host: the mirror lags by hours (snapshot) to
+/// days (experimental), and nightly builds need what shipped minutes ago.
+const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
 /// Total per-request deadline for the small in-memory manifest/signature
 /// fetches. The shared client deliberately has no total timeout (the artifact
@@ -44,12 +51,31 @@ pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::fro
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const MANIFEST_FILENAME: &str = "linux-amd64.json";
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const MANIFEST_FILENAME: &str = "linux-arm64.json";
+
 /// Release channel selector for picking an entry out of a `Manifest`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Channel {
     Stable,
     Snapshot,
+    Experimental,
+}
+
+impl Channel {
+    /// Title-case name for human-readable output; `Display` stays lowercase to
+    /// match the wire value.
+    pub fn title(self) -> &'static str {
+        match self {
+            Channel::Stable => "Stable",
+            Channel::Snapshot => "Snapshot",
+            Channel::Experimental => "Experimental",
+        }
+    }
 }
 
 impl fmt::Display for Channel {
@@ -57,6 +83,7 @@ impl fmt::Display for Channel {
         match self {
             Channel::Stable => f.write_str("stable"),
             Channel::Snapshot => f.write_str("snapshot"),
+            Channel::Experimental => f.write_str("experimental"),
         }
     }
 }
@@ -72,6 +99,10 @@ pub struct Manifest {
 pub struct ManifestChannels {
     pub stable: Option<ChannelRelease>,
     pub snapshot: Option<ChannelRelease>,
+    /// The publisher omits this until the channel has built once, so it stays
+    /// optional like the others rather than being required.
+    #[serde(default)]
+    pub experimental: Option<ChannelRelease>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -101,7 +132,17 @@ impl Manifest {
         match channel {
             Channel::Stable => self.channels.stable.as_ref(),
             Channel::Snapshot => self.channels.snapshot.as_ref(),
+            Channel::Experimental => self.channels.experimental.as_ref(),
         }
+    }
+}
+
+/// Which host to read from: stable off the gateway, the pre-release channels off
+/// the origin that publishes them.
+fn base_url(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Stable => MANIFEST_BASE_URL_STABLE,
+        Channel::Snapshot | Channel::Experimental => MANIFEST_BASE_URL_PRERELEASE,
     }
 }
 
@@ -122,14 +163,11 @@ fn verify_and_parse(manifest_bytes: &[u8], sig_bytes: &[u8]) -> Result<Manifest,
     serde_json::from_slice(manifest_bytes).map_err(|e| Error::Integrity(e.to_string()))
 }
 
-/// Download and verify the update manifest for the current platform.
-///
-/// The VPN-connected gate is *not* applied here — callers that want it must
-/// call [`crate::vpn_status::ensure_connected`] first (see the `update` and
-/// `check-update` flows).
-pub async fn download(client: &Client) -> Result<Manifest, Error> {
+/// Download and verify this platform's manifest; `channel` picks the host only,
+/// every channel rides along. VPN gating is the caller's (`ensure_connected`).
+pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Error> {
     let sig_filename = MANIFEST_FILENAME.replace(".json", ".json.asc");
-    let base = url::Url::parse(MANIFEST_BASE_URL).map_err(|e| Error::Other(e.to_string()))?;
+    let base = url::Url::parse(base_url(channel)).map_err(|e| Error::Other(e.to_string()))?;
     let manifest_url = base.join(MANIFEST_FILENAME).map_err(|e| Error::Other(e.to_string()))?;
     let sig_url = base.join(&sig_filename).map_err(|e| Error::Other(e.to_string()))?;
 
@@ -186,9 +224,39 @@ mod tests {
         assert!(!stable.version.is_empty(), "stable version should not be empty");
     }
 
+    /// Every fixture the pipeline generates, whatever platform this binary is —
+    /// they are read by name, never through `MANIFEST_FILENAME`.
+    const ALL_FIXTURES: [&str; 3] = ["macos-arm64.json", "linux-amd64.json", "linux-arm64.json"];
+
+    #[test]
+    fn stable_reads_the_ipfs_gateway_and_prerelease_the_origin() {
+        let join = |channel| {
+            url::Url::parse(base_url(channel))
+                .unwrap()
+                .join(MANIFEST_FILENAME)
+                .unwrap()
+                .to_string()
+        };
+        // The plain `<platform>.json`, never the `.ipfs.json` variant: that one
+        // is stable-only and its download_urls are IPFS paths.
+        assert!(!join(Channel::Stable).contains(".ipfs.json"));
+        assert!(join(Channel::Stable).starts_with("https://download.vpn.gnosis.eth.limo/manifests/"));
+        assert!(join(Channel::Snapshot).starts_with("https://download.gnosisvpn.io/manifests/"));
+    }
+
     #[test]
     fn verify_macos_arm64() {
         verify_fixture("macos-arm64.json");
+    }
+
+    #[test]
+    fn verify_linux_amd64() {
+        verify_fixture("linux-amd64.json");
+    }
+
+    #[test]
+    fn verify_linux_arm64() {
+        verify_fixture("linux-arm64.json");
     }
 
     // TODO: re-enable once PGP verification is restored in verify_and_parse.
@@ -205,15 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn deserializes_macos_fixture() {
-        let name = "macos-arm64.json";
-        let bytes = fixture(name);
-        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
-        let stable = manifest.channels.stable.expect("stable channel");
-        assert_eq!(stable.sha256.0.len(), 32);
-        assert!(stable.size_bytes.as_u64() > 0);
-        assert!(stable.published_at.timestamp() > 0);
-        assert!(!stable.min_os_version.is_empty());
+    fn deserializes_all_fixtures() {
+        for name in ALL_FIXTURES {
+            let bytes = fixture(name);
+            let manifest: Manifest =
+                serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("deserialize {name}: {e}"));
+            let stable = manifest.channels.stable.expect("stable channel");
+            assert_eq!(stable.sha256.0.len(), 32);
+            assert!(stable.size_bytes.as_u64() > 0);
+            assert!(stable.published_at.timestamp() > 0);
+            assert!(!stable.min_os_version.is_empty());
+        }
     }
 
     // TODO: re-add a mismatched-signature test once PGP verification is restored

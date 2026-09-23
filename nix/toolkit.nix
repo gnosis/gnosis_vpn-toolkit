@@ -12,6 +12,7 @@
   lib,
   nixLib,
   self,
+  pkgs,
   craneLib,
   advisory-db,
 }:
@@ -50,6 +51,10 @@ let
         ../gnosis_vpn-update/assets/update-loader.applescript
         ../gnosis_vpn-update/tests/fixtures/macos-arm64.json
         ../gnosis_vpn-update/tests/fixtures/macos-arm64.json.asc
+        ../gnosis_vpn-update/tests/fixtures/linux-amd64.json
+        ../gnosis_vpn-update/tests/fixtures/linux-amd64.json.asc
+        ../gnosis_vpn-update/tests/fixtures/linux-arm64.json
+        ../gnosis_vpn-update/tests/fixtures/linux-arm64.json.asc
       ];
     };
     deps = nixLib.mkDepsSrc {
@@ -66,6 +71,46 @@ let
       ];
     };
   };
+
+  # Target-specific package sets for cross-compiled Linux builds.
+  x86_64LinuxStaticPkgs = pkgs.pkgsCross.musl64.pkgsStatic;
+  aarch64LinuxStaticPkgs = pkgs.pkgsCross.aarch64-multiplatform-musl.pkgsStatic;
+
+  # Parameters required for musl static builds that nix-lib does not cover.
+  # nix-lib handles CARGO_BUILD_TARGET, CARGO_TARGET_*_LINKER, +crt-static, and
+  # openssl paths. We only need to disable the fortify hardening flag (musl
+  # incompatible) and, per arch, point cc-rs at the right cross compiler for the
+  # C built by aws-lc-sys / ring.
+  mkLinuxStaticEnv = _staticPkgs: {
+    hardeningDisable = [ "fortify" ];
+  };
+
+  mkWithStaticEnv =
+    env: drv:
+    drv.overrideAttrs (
+      prev:
+      env
+      // {
+        cargoArtifacts =
+          if prev.cargoArtifacts != null then prev.cargoArtifacts.overrideAttrs (_: env) else null;
+      }
+    );
+
+  withX86_64LinuxStaticEnv = mkWithStaticEnv (
+    mkLinuxStaticEnv x86_64LinuxStaticPkgs
+    // {
+      CC_x86_64_unknown_linux_musl = "${x86_64LinuxStaticPkgs.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+      CXX_x86_64_unknown_linux_musl = "${x86_64LinuxStaticPkgs.stdenv.cc}/bin/x86_64-unknown-linux-musl-g++";
+    }
+  );
+
+  withAarch64LinuxStaticEnv = mkWithStaticEnv (
+    mkLinuxStaticEnv aarch64LinuxStaticPkgs
+    // {
+      CC_aarch64_unknown_linux_musl = "${aarch64LinuxStaticPkgs.stdenv.cc}/bin/aarch64-unknown-linux-musl-gcc";
+      CXX_aarch64_unknown_linux_musl = "${aarch64LinuxStaticPkgs.stdenv.cc}/bin/aarch64-unknown-linux-musl-g++";
+    }
+  );
 
   # Darwin: set CARGO_BUILD_RUSTFLAGS with +crt-static and system libiconv flags,
   # then rewrite any Nix store libiconv references to /usr/lib so the binary
@@ -131,6 +176,50 @@ in
     }
   );
 
+  # Cross-compiled — x86_64 Linux
+  binary-gnosis_vpn-update-x86_64-linux = withX86_64LinuxStaticEnv (
+    builders.x86_64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
+    })
+  );
+
+  binary-gnosis_vpn-update-x86_64-linux-dev = withX86_64LinuxStaticEnv (
+    builders.x86_64-linux.callPackage nixLib.mkRustPackage (
+      (mkToolkitBuildArgs {
+        src = sources.main;
+        depsSrc = sources.deps;
+        extraCargoArgs = "--bin gnosis_vpn-update";
+      })
+      // {
+        CARGO_PROFILE = "dev";
+      }
+    )
+  );
+
+  # Cross-compiled — aarch64 Linux
+  binary-gnosis_vpn-update-aarch64-linux = withAarch64LinuxStaticEnv (
+    builders.aarch64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-update";
+    })
+  );
+
+  binary-gnosis_vpn-update-aarch64-linux-dev = withAarch64LinuxStaticEnv (
+    builders.aarch64-linux.callPackage nixLib.mkRustPackage (
+      (mkToolkitBuildArgs {
+        src = sources.main;
+        depsSrc = sources.deps;
+        extraCargoArgs = "--bin gnosis_vpn-update";
+      })
+      // {
+        CARGO_PROFILE = "dev";
+      }
+    )
+  );
+
   # Tests / QA
   toolkit-test = builders.local.callPackage nixLib.mkRustPackage (
     (mkToolkitBuildArgs {
@@ -175,11 +264,11 @@ in
 
   # macOS — aarch64
   #
-  # Use `builders.local` rather than `builders.aarch64-darwin`. The flake
-  # exposes package outputs only for the aarch64-darwin system (flake.nix
-  # guards `packages`/`checks` with `optionalAttrs`; the linux system exists
-  # solely for a devshell), so these outputs are always evaluated and built on
-  # a native aarch64-darwin host — `builders.local` is therefore already the
+  # Use `builders.local` rather than `builders.aarch64-darwin`. flake.nix
+  # exposes these two outputs only on the aarch64-darwin system (guarded with
+  # `optionalAttrs isDarwin`; the Linux systems expose the cross-compiled
+  # musl outputs above instead), so they are always evaluated and built on a
+  # native aarch64-darwin host — `builders.local` is therefore already the
   # aarch64-darwin builder, and a native darwin build is behaviorally identical
   # to nix-lib's `aarch64-darwin` builder (isCross collapses to false,
   # crossSystem to localSystem).

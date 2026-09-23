@@ -1,9 +1,18 @@
 # gnosis_vpn-update
 
-macOS-only self-updater for the Gnosis VPN client. Spawned as root by
-`gnosis_vpn-app` (`sudo -n /usr/local/bin/gnosis_vpn-update update ...`); emits
-NDJSON statuses (`Checking | Downloading | Installing | Completed | Failed`)
-on stdout. See the module docs in `src/` for the engine details.
+Self-updater for the Gnosis VPN client. Spawned as root by `gnosis_vpn-app`
+(`sudo -n /usr/local/bin/gnosis_vpn-update update ...`); emits NDJSON statuses
+(`Checking | Downloading | Installing | Completed | Failed`) on stdout. See the
+module docs in `src/` for the engine details.
+
+`check-update` instead prints a single object — the checked `channel`, the
+gated `outcome`, and the full update `manifest` with **both** channel entries —
+so the app can render the complete release picture from one invocation.
+
+The install engine is **macOS-only**: `check-update` and `version` work the same
+on Linux, but `update` there refuses immediately and prints the apt commands
+instead (`update::MANUAL_UPDATE_HINT`, kept in step with the app's
+`HowToUpdateModal.tsx`).
 
 ## assets/
 

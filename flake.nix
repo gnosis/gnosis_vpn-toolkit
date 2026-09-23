@@ -48,14 +48,14 @@
       imports = [
         inputs.nix-lib.flakeModules.default
       ];
-      # The updater crate compiles only on aarch64-darwin (macOS-only feature
-      # set). x86_64-linux is declared anyway so the flake still provides a
-      # devshell and formatter there: CI's release job regenerates Cargo.lock
-      # via `nix develop` on an ubuntu runner, and the Linux dev box needs
-      # cargo/fmt tooling. Packages and checks stay darwin-only below.
+      # The crate builds on all three: `check-update` and `version` behave the
+      # same everywhere, while `update` has an install engine only on macOS and
+      # refuses with the apt instructions elsewhere. Each system exposes the
+      # binaries it can actually produce (see `packages` below).
       systems = [
         "aarch64-darwin"
         "x86_64-linux"
+        "aarch64-linux"
       ];
       perSystem =
         {
@@ -88,6 +88,7 @@
               lib
               nixLib
               self
+              pkgs
               craneLib
               advisory-db
               ;
@@ -123,7 +124,7 @@
             };
           };
 
-          checks = lib.optionalAttrs isDarwin {
+          checks = {
             inherit (toolkitPackages)
               toolkit-clippy
               toolkit-docs
@@ -133,15 +134,32 @@
               ;
           };
 
-          packages = lib.optionalAttrs isDarwin {
+          # Native builds everywhere; the release binaries are per-target, and
+          # each system only exposes the ones it can build (the musl cross
+          # pkg-sets are a Linux affair, the darwin pair needs a darwin host).
+          packages = {
             inherit (toolkitPackages)
               binary-gnosis_vpn-update
               binary-gnosis_vpn-update-dev
+              ;
+            default = toolkitPackages.binary-gnosis_vpn-update;
+          }
+          // lib.optionalAttrs isDarwin {
+            inherit (toolkitPackages)
               binary-gnosis_vpn-update-aarch64-darwin
               binary-gnosis_vpn-update-aarch64-darwin-dev
               ;
+            # The pre-commit hooks still trip over `.envrc` (a shebang on a
+            # non-executable file), so this stays off the Linux shells.
             inherit pre-commit-check;
-            default = toolkitPackages.binary-gnosis_vpn-update;
+          }
+          // lib.optionalAttrs (!isDarwin) {
+            inherit (toolkitPackages)
+              binary-gnosis_vpn-update-x86_64-linux
+              binary-gnosis_vpn-update-x86_64-linux-dev
+              binary-gnosis_vpn-update-aarch64-linux
+              binary-gnosis_vpn-update-aarch64-linux-dev
+              ;
           };
 
           devShells.default =
@@ -160,11 +178,11 @@
                 VERGEN_GIT_SHA = toString (self.shortRev or self.dirtyShortRev or "unknown");
               }
             else
-              # Slim shell for non-darwin hosts: enough cargo tooling to
-              # maintain Cargo.{toml,lock} (CI's bump-version step runs
-              # `nix develop --command cargo metadata … | jq … | cargo update`)
-              # without pulling in the darwin-only crate builds or the
-              # pre-commit check.
+              # Slim shell for non-darwin hosts: the full cargo toolchain for
+              # building and testing the crate (and for CI's bump-version step,
+              # which runs `nix develop --command cargo metadata … | jq … |
+              # cargo update`), without the pre-commit check — its hooks still
+              # fail on `.envrc`.
               pkgs.mkShell {
                 packages = [
                   (pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml)

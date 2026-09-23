@@ -141,12 +141,18 @@ pub async fn finish(aside: RenameAside, install_succeeded: bool) -> Option<Strin
     match tokio::process::Command::new(INSTALLED_BINARY_PATH)
         .arg("version")
         .arg("--output")
-        .arg("plain")
+        .arg("json")
         .output()
         .await
     {
         Ok(output) if output.status.success() => {
-            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // JSON, not plain: this lands in a tab-separated audit-log field,
+            // and plain `version` is two labelled lines.
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let version = serde_json::from_str::<serde_json::Value>(stdout.trim())
+                .ok()
+                .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_owned))
+                .unwrap_or_else(|| stdout.lines().next().unwrap_or_default().trim().to_owned());
             tracing::info!(version = %version, "new updater binary responds; self-update took effect");
             Some(version)
         }
