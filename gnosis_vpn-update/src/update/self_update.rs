@@ -1,18 +1,16 @@
 //! Self-update via rename-aside.
 //!
-//! The pkg's postinstall `cp`s a new `/usr/local/bin/gnosis_vpn-update` over
-//! the old one — but this very process is running from that file, and macOS
-//! refuses to overwrite a running Mach-O image (`ETXTBSY`-like failure the
-//! postinstall silently swallows), so historically the updater never actually
-//! updated itself. The fix needs no packaging change: just before spawning
-//! `installer(8)`, the running binary is renamed aside to
+//! The pkg payload ships `/usr/local/bin/gnosis_vpn-update` and installer(8)
+//! extracts it over the old one — but this very process is running from that
+//! file, and macOS refuses to overwrite a running Mach-O image, so historically
+//! the updater never actually updated itself. The fix needs no packaging change:
+//! just before spawning `installer(8)`, the running binary is renamed aside to
 //! `gnosis_vpn-update.old`. The process keeps executing from its (renamed)
-//! inode, and the postinstall's `cp` now creates a *fresh* file at the real
-//! path and succeeds.
+//! inode, and extraction creates a *fresh* file at the real path.
 //!
 //! On install success the `.old` file is deleted and the new on-disk binary's
 //! `version` output is captured as proof for the audit log. On failure the
-//! `.old` binary is renamed back — unless the postinstall already wrote a new
+//! `.old` binary is renamed back — unless the payload already landed a new
 //! binary at the path, which must not be clobbered.
 //!
 //! Best-effort throughout: every problem only logs a warning and never fails
@@ -21,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 /// Path the pkg installs the updater binary to. Used instead of
-/// `current_exe()` on purpose: the postinstall replaces this exact path, and a
+/// `current_exe()` on purpose: the payload replaces this exact path, and a
 /// dev binary running from somewhere else must not shuffle files around in
 /// `/usr/local/bin` based on where *it* happens to live.
 pub const INSTALLED_BINARY_PATH: &str = "/usr/local/bin/gnosis_vpn-update";
@@ -37,9 +35,8 @@ pub struct RenameAside {
     renamed: bool,
 }
 
-/// Rename the installed updater binary aside so the postinstall's `cp` can
-/// create a fresh file at the real path. Call immediately before spawning
-/// `installer(8)`.
+/// Rename the installed updater binary aside so payload extraction can create a
+/// fresh file at the real path. Call immediately before spawning `installer(8)`.
 pub fn rename_aside() -> RenameAside {
     if let Ok(exe) = std::env::current_exe()
         && exe != Path::new(INSTALLED_BINARY_PATH)
@@ -65,7 +62,7 @@ impl RenameAside {
                 tracing::info!(
                     from = %path.display(),
                     to = %old_path.display(),
-                    "renamed running updater binary aside so postinstall can replace it"
+                    "renamed running updater binary aside so the payload can replace it"
                 );
                 true
             }
@@ -73,7 +70,7 @@ impl RenameAside {
                 tracing::warn!(
                     error = %e,
                     path = %path.display(),
-                    "cannot rename updater binary aside; postinstall will fail to replace it (as before)"
+                    "cannot rename updater binary aside; the payload will fail to replace it (as before)"
                 );
                 false
             }
@@ -85,8 +82,8 @@ impl RenameAside {
         }
     }
 
-    /// Install succeeded: the postinstall has written a new binary at the real
-    /// path, so the `.old` copy is dead weight — delete it.
+    /// Install succeeded: the payload has landed a new binary at the real path,
+    /// so the `.old` copy is dead weight — delete it.
     fn finish_success(self) {
         if !self.renamed {
             return;
@@ -97,9 +94,9 @@ impl RenameAside {
     }
 
     /// Install failed: put the old binary back so the system keeps a working
-    /// updater — unless the postinstall got far enough to write a new binary
-    /// at the path, which must not be clobbered (it is at least as good as the
-    /// `.old` one).
+    /// updater — unless the install got far enough to land a new binary at the
+    /// path, which must not be clobbered (it is at least as good as the `.old`
+    /// one).
     fn finish_failure(self) {
         if !self.renamed {
             return;
@@ -107,7 +104,7 @@ impl RenameAside {
         if self.path.exists() {
             tracing::warn!(
                 path = %self.path.display(),
-                "install failed but postinstall already replaced the updater binary; keeping it and dropping the old copy"
+                "install failed but the updater binary was already replaced; keeping it and dropping the old copy"
             );
             let _ = std::fs::remove_file(&self.old_path);
             return;
@@ -211,7 +208,7 @@ mod tests {
         let old = dir.path("gnosis_vpn-update.old");
         assert_eq!(std::fs::read_to_string(&old).unwrap(), "old-binary");
 
-        // Simulate the postinstall writing the fresh binary, then settle.
+        // Simulate payload extraction writing the fresh binary, then settle.
         std::fs::write(&bin, "new-binary").unwrap();
         aside.finish_success();
         assert!(!old.exists());
@@ -233,13 +230,13 @@ mod tests {
     }
 
     #[test]
-    fn failure_does_not_clobber_a_new_binary_written_by_postinstall() {
+    fn failure_does_not_clobber_a_new_binary_written_by_the_payload() {
         let dir = TempDir::new("noclobber");
         let bin = dir.path("gnosis_vpn-update");
         std::fs::write(&bin, "old-binary").unwrap();
 
         let aside = RenameAside::engage(&bin);
-        // Postinstall replaced the binary before the install failed later.
+        // The payload replaced the binary before the install failed later.
         std::fs::write(&bin, "new-binary").unwrap();
 
         aside.finish_failure();
