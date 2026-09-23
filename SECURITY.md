@@ -39,14 +39,6 @@ curl -fsSLO https://raw.githubusercontent.com/gnosis/gnosis_vpn-toolkit/main/gno
 gpg --import gnosisvpn-public-key.asc
 ```
 
-**From release assets:**
-
-Download `gnosisvpn-public-key.asc` from any release and import:
-
-```bash
-gpg --import gnosisvpn-public-key.asc
-```
-
 ## Linux Binary Verification
 
 Each Linux release includes three files per architecture:
@@ -83,8 +75,29 @@ gpg: Good signature from "GnosisVPN (Gnosis VPN) <tech@hoprnet.org>" [ultimate]
 
 ## macOS Binary Verification
 
-macOS binaries are signed with an Apple Developer certificate and notarized by
-Apple. The system verifies signatures automatically during installation.
+macOS binaries are signed with an Apple Developer certificate, using the
+hardened runtime and a secure timestamp. They are **not** notarized by Apple, so
+a binary carrying the quarantine attribute (e.g. downloaded through a browser)
+is blocked by Gatekeeper until that attribute is removed:
+
+```bash
+xattr -d com.apple.quarantine gnosis_vpn-update-aarch64-darwin
+```
+
+### Verify Code Signature
+
+```bash
+codesign --verify --strict --verbose=2 gnosis_vpn-update-aarch64-darwin
+```
+
+Expected output:
+
+```
+gnosis_vpn-update-aarch64-darwin: valid on disk
+gnosis_vpn-update-aarch64-darwin: satisfies its Designated Requirement
+```
+
+Inspect the signing identity with `codesign --display --verbose=4 <binary>`.
 
 ### Verify SHA256 Checksum (macOS)
 
