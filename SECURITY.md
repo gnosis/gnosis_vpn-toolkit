@@ -77,11 +77,22 @@ gpg: Good signature from "GnosisVPN (Gnosis VPN) <tech@hoprnet.org>" [ultimate]
 
 macOS binaries are signed with an Apple Developer certificate, using the
 hardened runtime and a secure timestamp. They are **not** notarized by Apple, so
-a binary carrying the quarantine attribute (e.g. downloaded through a browser)
-is blocked by Gatekeeper until that attribute is removed:
+Gatekeeper blocks a binary carrying the quarantine attribute (e.g. one
+downloaded through a browser). Verify the binary before clearing that attribute.
+
+### Verify SHA256 Checksum (macOS)
+
+Download the binary and checksum from the release page
+https://github.com/gnosis/gnosis_vpn-toolkit/releases
 
 ```bash
-xattr -d com.apple.quarantine gnosis_vpn-update-aarch64-darwin
+shasum -a 256 -c gnosis_vpn-update-aarch64-darwin.sha256
+```
+
+Expected output:
+
+```
+gnosis_vpn-update-aarch64-darwin: OK
 ```
 
 ### Verify Code Signature
@@ -99,19 +110,12 @@ gnosis_vpn-update-aarch64-darwin: satisfies its Designated Requirement
 
 Inspect the signing identity with `codesign --display --verbose=4 <binary>`.
 
-### Verify SHA256 Checksum (macOS)
+### Clearing the Quarantine Attribute
 
-Download the binary and checksum from the release page
-https://github.com/gnosis/gnosis_vpn-toolkit/releases
+Only if a binary whose checksum and signature both verified is still blocked:
 
 ```bash
-shasum -a 256 -c gnosis_vpn-update-aarch64-darwin.sha256
-```
-
-Expected output:
-
-```
-gnosis_vpn-update-aarch64-darwin: OK
+xattr -d com.apple.quarantine gnosis_vpn-update-aarch64-darwin
 ```
 
 ## Reporting Security Vulnerabilities
