@@ -143,7 +143,8 @@ the install engine is macOS-only — exercise it there. This repo uses Nix. With
 nix develop            # dev shell with the rust toolchain + tooling
 cargo build            # builds the whole workspace; or: nix build .#binary-gnosis_vpn-update
 cargo test             # runs the workspace test suite
-nix flake check -L     # clippy + tests + audit + licenses
+nix flake check -L     # clippy + docs + tests + licenses
+nix run .#audit        # cargo-audit against the live RUSTSEC advisory DB
 ```
 
 The release binaries are per target — statically linked against musl on Linux:

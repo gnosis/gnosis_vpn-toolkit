@@ -18,15 +18,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    advisory-db = {
-      url = "github:rustsec/advisory-db";
-      flake = false;
-    };
-
     # HOPR Nix Library (provides reusable Rust build functions and treefmt config)
     nix-lib = {
       url = "github:hoprnet/nix-lib";
       inputs.nixpkgs.follows = "nixpkgs";
+      # Our nixpkgs is already unstable; following avoids a second nixpkgs fetch per job.
+      inputs.nixpkgs-unstable.follows = "nixpkgs";
+      inputs.flake-parts.follows = "flake-parts";
       inputs.crane.follows = "crane";
       inputs.rust-overlay.follows = "rust-overlay";
     };
@@ -39,7 +37,6 @@
       nixpkgs,
       rust-overlay,
       crane,
-      advisory-db,
       pre-commit,
       nix-lib,
       ...
@@ -90,7 +87,6 @@
               self
               pkgs
               craneLib
-              advisory-db
               ;
           };
 
@@ -129,10 +125,11 @@
               toolkit-clippy
               toolkit-docs
               toolkit-test
-              toolkit-audit
               toolkit-licenses
               ;
           };
+
+          apps.audit = nixLib.mkAuditApp { rustToolchainFile = ./rust-toolchain.toml; };
 
           # Native builds everywhere; the release binaries are per-target, and
           # each system only exposes the ones it can build (the musl cross

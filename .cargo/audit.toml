@@ -9,9 +9,6 @@
 # Advisory IDs to ignore
 ignore = []
 
-# Treat unmaintained warnings as informational only (not errors)
-informational_warnings = ["unmaintained"]
-
 # Output configuration
 [output]
 deny      = []
