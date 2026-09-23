@@ -12,9 +12,13 @@ build-x86_64:
 build-arm64:
     nix build .#binary-gnosis_vpn-update-aarch64-linux
 
-# Run the full flake check suite (clippy, tests, audit, licenses)
+# Run the full flake check suite (clippy, docs, tests, licenses)
 check:
     nix flake check -L
+
+# Run cargo-audit against the live RUSTSEC advisory DB
+audit:
+    nix run -L .#audit
 
 # Run the test suite
 test:
