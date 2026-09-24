@@ -477,8 +477,8 @@ async fn drive_engine(
 
     let _ = tx.send(UpdateStatus::Installing).await;
 
-    // Rename the running binary aside so the pkg postinstall's `cp` of the new
-    // updater succeeds instead of silently failing on the running Mach-O.
+    // Rename the running binary aside so the pkg payload's new updater lands
+    // instead of failing to overwrite the running Mach-O.
     #[cfg(target_os = "macos")]
     let aside = self_update::rename_aside();
 
@@ -800,8 +800,8 @@ pub(crate) mod install_platform {
     ///
     /// INVARIANT: once this returns, the process is running from a
     /// replaced/unlinked image — `self_update` renamed the on-disk binary
-    /// aside just before the spawn, and the pkg postinstall wrote a *new*
-    /// binary at `/usr/local/bin/gnosis_vpn-update`. All remaining work
+    /// aside just before the spawn, and the pkg payload landed a *new* binary
+    /// at `/usr/local/bin/gnosis_vpn-update`. All remaining work
     /// (loader dismiss — which deliberately runs before the probe so the
     /// window closes as soon as the install ends — `persist_attempt`,
     /// `audit_log`, the terminal NDJSON emit) must not re-read or re-exec
