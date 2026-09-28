@@ -9,11 +9,13 @@ use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
 // use pgp::{Deserializable, SignedPublicKey, StandaloneSignature};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, serde_as};
 use std::fmt;
 // use std::io::Cursor;
+use std::time::Duration;
+use tokio::time::Instant;
 use url::Url;
 
 pub type Timestamp = DateTime<Utc>;
@@ -42,11 +44,27 @@ const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/man
 /// days (experimental), and nightly builds need what shipped minutes ago.
 const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
-/// Total per-request deadline for the small in-memory manifest/signature
-/// fetches. The shared client deliberately has no total timeout (the artifact
-/// download must be allowed to run long), so these bounded fetches set their
-/// own.
-pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Per-attempt deadline for the small in-memory manifest/signature fetches.
+/// The shared client deliberately has no total timeout (the artifact download
+/// must be allowed to run long), so these bounded fetches set their own;
+/// `RetryPolicy::budget` caps all attempts together.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+struct RetryPolicy {
+    max_attempts: u32,
+    /// Sleep after the first failed attempt; doubles after each further one.
+    backoff: Duration,
+    /// Shared by both files: keeps `check-update` under the app's 75 s kill.
+    budget: Duration,
+}
+
+impl RetryPolicy {
+    const PROD: Self = Self {
+        max_attempts: 5,
+        backoff: Duration::from_secs(1),
+        budget: Duration::from_secs(60),
+    };
+}
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
@@ -173,34 +191,61 @@ pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Err
 
     tracing::debug!(?manifest_url, ?sig_url, "downloading update manifest and signature");
 
-    let manifest_bytes = client
-        .get(manifest_url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| Error::Other(e.to_string()))?
-        .bytes()
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?;
-
-    let sig_bytes = client
-        .get(sig_url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| Error::Other(e.to_string()))?
-        .bytes()
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?;
+    let policy = &RetryPolicy::PROD;
+    let deadline = Instant::now() + policy.budget;
+    let manifest_bytes = fetch(client, &manifest_url, deadline, policy).await?;
+    let sig_bytes = fetch(client, &sig_url, deadline, policy).await?;
 
     verify_and_parse(&manifest_bytes, &sig_bytes)
+}
+
+/// GET `url` into memory, retrying transient failures until the policy's
+/// attempts or `deadline` run out.
+async fn fetch(client: &Client, url: &Url, deadline: Instant, policy: &RetryPolicy) -> Result<Vec<u8>, Error> {
+    let mut backoff = policy.backoff;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let timeout = REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now()));
+        let e = match get_bytes(client, url, timeout).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => e,
+        };
+        if !is_transient(&e) || attempt >= policy.max_attempts || Instant::now() + backoff >= deadline {
+            return Err(Error::Other(format!("{e} (attempt {attempt}/{})", policy.max_attempts)));
+        }
+        tracing::warn!(%url, attempt, max_attempts = policy.max_attempts, error = %e, "manifest fetch failed — retrying");
+        tokio::time::sleep(backoff).await;
+        backoff *= 2;
+    }
+}
+
+async fn get_bytes(client: &Client, url: &Url, timeout: Duration) -> reqwest::Result<Vec<u8>> {
+    let response = client
+        .get(url.clone())
+        .timeout(timeout)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(response.bytes().await?.into())
+}
+
+/// A status proves the origin answered, so only 5xx, 408 and 429 may clear up
+/// on their own. Builder/redirect errors are structural; anything else
+/// (connect failure, timeout, cut-off body) is the network and worth retrying.
+fn is_transient(e: &reqwest::Error) -> bool {
+    match e.status() {
+        Some(s) => s.is_server_error() || s == StatusCode::REQUEST_TIMEOUT || s == StatusCode::TOO_MANY_REQUESTS,
+        None => !(e.is_builder() || e.is_redirect()),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{AfterScript, http_response, spawn_server, test_client};
+    use std::net::SocketAddr;
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -289,4 +334,80 @@ mod tests {
     // TODO: re-add a mismatched-signature test once PGP verification is restored
     // in verify_and_parse; it needs a second signed macOS fixture to use as the
     // wrong signature.
+
+    fn fast_policy(backoff_ms: u64, budget_ms: u64) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 5,
+            backoff: Duration::from_millis(backoff_ms),
+            budget: Duration::from_millis(budget_ms),
+        }
+    }
+
+    async fn fetch_from(addr: SocketAddr, policy: &RetryPolicy) -> Result<Vec<u8>, Error> {
+        let url = Url::parse(&format!("http://{addr}/{MANIFEST_FILENAME}")).unwrap();
+        fetch(&test_client(), &url, Instant::now() + policy.budget, policy).await
+    }
+
+    fn request_count(rx: &mut UnboundedReceiver<String>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok()).count()
+    }
+
+    fn unavailable() -> Vec<u8> {
+        http_response("503 Service Unavailable", &[], 0, b"")
+    }
+
+    #[tokio::test]
+    async fn retries_transient_failures_then_succeeds() {
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![unavailable(), unavailable(), ok], AfterScript::CloseConnections).await;
+
+        let bytes = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 3);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_max_attempts() {
+        let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
+
+        let err = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap_err();
+
+        assert!(err.to_string().contains("503"), "got: {err}");
+        assert!(err.to_string().contains("attempt 5/5"), "got: {err}");
+        assert_eq!(request_count(&mut rx), 5);
+    }
+
+    #[tokio::test]
+    async fn retries_mid_body_drop() {
+        let cut = http_response("200 OK", &[], 100, b"{");
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![cut, ok], AfterScript::CloseConnections).await;
+
+        let bytes = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 2);
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_client_error() {
+        let not_found = http_response("404 Not Found", &[], 0, b"");
+        let (addr, mut rx) = spawn_server(vec![not_found], AfterScript::RepeatLastResponse).await;
+
+        let err = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap_err();
+
+        assert!(err.to_string().contains("404"), "got: {err}");
+        assert_eq!(request_count(&mut rx), 1);
+    }
+
+    #[tokio::test]
+    async fn stops_when_budget_exhausted() {
+        let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
+
+        let err = fetch_from(addr, &fast_policy(500, 250)).await.unwrap_err();
+
+        assert!(err.to_string().contains("attempt 1/5"), "got: {err}");
+        assert_eq!(request_count(&mut rx), 1);
+    }
 }

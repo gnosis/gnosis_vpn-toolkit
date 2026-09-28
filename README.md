@@ -114,6 +114,11 @@ the manifest. Two consequences worth knowing:
 - `channels.experimental` is absent until that channel has published once, so
   consumers must treat it as optional rather than required.
 
+The manifest and its `.asc` are each fetched up to 5 times, retrying network
+errors and 5xx/408/429 responses with a backoff starting at 1 s. All attempts
+share one 60 s budget, which keeps `check-update` inside the app's 75 s
+timeout. Retries are logged to stderr only; stdout still carries one result.
+
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
 selection (from the `/etc/gnosisvpn/config.toml` symlink target, falling back

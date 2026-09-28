@@ -9,5 +9,7 @@ pub mod cli;
 pub mod logging;
 pub mod manifest;
 pub mod output;
+#[cfg(test)]
+mod test_server;
 pub mod update;
 pub mod vpn_status;
