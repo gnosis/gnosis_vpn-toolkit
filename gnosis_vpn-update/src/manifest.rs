@@ -9,7 +9,7 @@ use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
 // use pgp::{Deserializable, SignedPublicKey, StandaloneSignature};
-use reqwest::{Client, StatusCode};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, serde_as};
 use std::fmt;
@@ -199,7 +199,7 @@ pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Err
     verify_and_parse(&manifest_bytes, &sig_bytes)
 }
 
-/// GET `url` into memory, retrying transient failures until the policy's
+/// GET `url` into memory, retrying failures until the policy's
 /// attempts or `deadline` run out.
 async fn fetch(client: &Client, url: &Url, deadline: Instant, policy: &RetryPolicy) -> Result<Vec<u8>, Error> {
     let mut backoff = policy.backoff;
@@ -211,7 +211,7 @@ async fn fetch(client: &Client, url: &Url, deadline: Instant, policy: &RetryPoli
             Ok(bytes) => return Ok(bytes),
             Err(e) => e,
         };
-        if !is_transient(&e) || attempt >= policy.max_attempts || Instant::now() + backoff >= deadline {
+        if !is_retryable(&e) || attempt >= policy.max_attempts || Instant::now() + backoff >= deadline {
             return Err(Error::Other(format!("{e} (attempt {attempt}/{})", policy.max_attempts)));
         }
         tracing::warn!(%url, attempt, max_attempts = policy.max_attempts, error = %e, "manifest fetch failed — retrying");
@@ -230,14 +230,10 @@ async fn get_bytes(client: &Client, url: &Url, timeout: Duration) -> reqwest::Re
     Ok(response.bytes().await?.into())
 }
 
-/// A status proves the origin answered, so only 5xx, 408 and 429 may clear up
-/// on their own. Builder/redirect errors are structural; anything else
-/// (connect failure, timeout, cut-off body) is the network and worth retrying.
-fn is_transient(e: &reqwest::Error) -> bool {
-    match e.status() {
-        Some(s) => s.is_server_error() || s == StatusCode::REQUEST_TIMEOUT || s == StatusCode::TOO_MANY_REQUESTS,
-        None => !(e.is_builder() || e.is_redirect()),
-    }
+/// Builder/redirect errors are structural and a retry cannot fix them; every
+/// other failure is retried, any HTTP error status included.
+fn is_retryable(e: &reqwest::Error) -> bool {
+    !(e.is_builder() || e.is_redirect())
 }
 
 #[cfg(test)]
@@ -391,14 +387,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_retry_client_error() {
+    async fn retries_client_error() {
         let not_found = http_response("404 Not Found", &[], 0, b"");
-        let (addr, mut rx) = spawn_server(vec![not_found], AfterScript::RepeatLastResponse).await;
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![not_found, ok], AfterScript::CloseConnections).await;
 
-        let err = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap_err();
+        let bytes = fetch_from(addr, &fast_policy(10, 5000)).await.unwrap();
 
-        assert!(err.to_string().contains("404"), "got: {err}");
-        assert_eq!(request_count(&mut rx), 1);
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 2);
     }
 
     #[tokio::test]
