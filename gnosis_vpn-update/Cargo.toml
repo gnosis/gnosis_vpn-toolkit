@@ -16,6 +16,7 @@ doctest = false
 
 [dependencies]
 anyhow             = { workspace = true }
+backon             = { workspace = true }
 bytesize           = { workspace = true }
 chrono             = { workspace = true }
 clap               = { workspace = true }

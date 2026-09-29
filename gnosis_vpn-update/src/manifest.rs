@@ -5,6 +5,7 @@
 //! the socket) has moved to [`crate::vpn_status`]; `download` no longer knows
 //! about the socket. Callers apply the gate before fetching.
 
+use backon::{ExponentialBuilder, Retryable};
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 // TODO: re-enable once the public key is hosted externally; see verify_and_parse below.
@@ -14,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{hex::Hex, serde_as};
 use std::fmt;
 // use std::io::Cursor;
+use std::time::Duration;
 use url::Url;
 
 pub type Timestamp = DateTime<Utc>;
@@ -42,11 +44,17 @@ const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/man
 /// days (experimental), and nightly builds need what shipped minutes ago.
 const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
-/// Total per-request deadline for the small in-memory manifest/signature
-/// fetches. The shared client deliberately has no total timeout (the artifact
-/// download must be allowed to run long), so these bounded fetches set their
-/// own.
-pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound each fetch without imposing a timeout on artifact downloads via the shared client.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `max_times` counts retries: 5 attempts per file.
+const BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
+    .with_min_delay(Duration::from_secs(1))
+    .with_factor(2.0)
+    .with_max_times(4);
+
+/// Single stop for both fetches together, keeping them inside the app's 75 s timeout.
+const BUDGET: Duration = Duration::from_secs(60);
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const MANIFEST_FILENAME: &str = "macos-arm64.json";
@@ -173,34 +181,55 @@ pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Err
 
     tracing::debug!(?manifest_url, ?sig_url, "downloading update manifest and signature");
 
-    let manifest_bytes = client
-        .get(manifest_url)
+    download_from(client, &manifest_url, &sig_url, BUDGET).await
+}
+
+// Cancelling mid-fetch is safe: the bytes only live in memory.
+async fn download_from(
+    client: &Client,
+    manifest_url: &Url,
+    sig_url: &Url,
+    budget: Duration,
+) -> Result<Manifest, Error> {
+    tokio::time::timeout(budget, async {
+        let manifest_bytes = fetch(client, manifest_url, BACKOFF).await?;
+        let sig_bytes = fetch(client, sig_url, BACKOFF).await?;
+        verify_and_parse(&manifest_bytes, &sig_bytes)
+    })
+    .await
+    .map_err(|_| Error::Other("manifest fetch timed out".into()))?
+}
+
+async fn fetch(client: &Client, url: &Url, backoff: ExponentialBuilder) -> Result<Vec<u8>, Error> {
+    (|| get_bytes(client, url))
+        .retry(backoff)
+        .when(is_retryable)
+        .notify(|e, delay| tracing::warn!(%url, error = %e, ?delay, "manifest fetch failed — retrying"))
+        .await
+        .map_err(|e| Error::Other(e.to_string()))
+}
+
+async fn get_bytes(client: &Client, url: &Url) -> reqwest::Result<Vec<u8>> {
+    let response = client
+        .get(url.clone())
         .timeout(REQUEST_TIMEOUT)
         .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| Error::Other(e.to_string()))?
-        .bytes()
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?;
+        .await?
+        .error_for_status()?;
+    Ok(response.bytes().await?.into())
+}
 
-    let sig_bytes = client
-        .get(sig_url)
-        .timeout(REQUEST_TIMEOUT)
-        .send()
-        .await
-        .and_then(|r| r.error_for_status())
-        .map_err(|e| Error::Other(e.to_string()))?
-        .bytes()
-        .await
-        .map_err(|e| Error::Other(e.to_string()))?;
-
-    verify_and_parse(&manifest_bytes, &sig_bytes)
+// Builder and redirect errors cannot be fixed by retrying.
+fn is_retryable(e: &reqwest::Error) -> bool {
+    !(e.is_builder() || e.is_redirect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_server::{AfterScript, http_response, spawn_server, test_client};
+    use std::net::SocketAddr;
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     const FIXTURES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
@@ -289,4 +318,77 @@ mod tests {
     // TODO: re-add a mismatched-signature test once PGP verification is restored
     // in verify_and_parse; it needs a second signed macOS fixture to use as the
     // wrong signature.
+
+    async fn fetch_from(addr: SocketAddr, backoff_ms: u64) -> Result<Vec<u8>, Error> {
+        let url = Url::parse(&format!("http://{addr}/{MANIFEST_FILENAME}")).unwrap();
+        let backoff = BACKOFF.with_min_delay(Duration::from_millis(backoff_ms));
+        fetch(&test_client(), &url, backoff).await
+    }
+
+    fn request_count(rx: &mut UnboundedReceiver<String>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok()).count()
+    }
+
+    fn unavailable() -> Vec<u8> {
+        http_response("503 Service Unavailable", &[], 0, b"")
+    }
+
+    #[tokio::test]
+    async fn retries_transient_failures_then_succeeds() {
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![unavailable(), unavailable(), ok], AfterScript::CloseConnections).await;
+
+        let bytes = fetch_from(addr, 10).await.unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 3);
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_max_attempts() {
+        let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
+
+        let err = fetch_from(addr, 10).await.unwrap_err();
+
+        assert!(err.to_string().contains("503"), "got: {err}");
+        assert_eq!(request_count(&mut rx), 5);
+    }
+
+    #[tokio::test]
+    async fn retries_mid_body_drop() {
+        let cut = http_response("200 OK", &[], 100, b"{");
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![cut, ok], AfterScript::CloseConnections).await;
+
+        let bytes = fetch_from(addr, 10).await.unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_client_error() {
+        let not_found = http_response("404 Not Found", &[], 0, b"");
+        let ok = http_response("200 OK", &[], 2, b"{}");
+        let (addr, mut rx) = spawn_server(vec![not_found, ok], AfterScript::CloseConnections).await;
+
+        let bytes = fetch_from(addr, 10).await.unwrap();
+
+        assert_eq!(bytes, b"{}");
+        assert_eq!(request_count(&mut rx), 2);
+    }
+
+    // The budget expires during the first backoff sleep, so only one request lands.
+    #[tokio::test]
+    async fn stops_when_budget_exhausted() {
+        let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
+        let url = Url::parse(&format!("http://{addr}/{MANIFEST_FILENAME}")).unwrap();
+
+        let err = download_from(&test_client(), &url, &url, Duration::from_millis(250))
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("timed out"), "got: {err}");
+        assert_eq!(request_count(&mut rx), 1);
+    }
 }
