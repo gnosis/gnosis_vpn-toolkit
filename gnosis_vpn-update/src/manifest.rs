@@ -16,7 +16,6 @@ use serde_with::{hex::Hex, serde_as};
 use std::fmt;
 // use std::io::Cursor;
 use std::time::Duration;
-use tokio::time::Instant;
 use url::Url;
 
 pub type Timestamp = DateTime<Utc>;
@@ -54,7 +53,7 @@ const BACKOFF: ExponentialBuilder = ExponentialBuilder::new()
     .with_factor(2.0)
     .with_max_times(4);
 
-/// Keep both fetches inside the app's 75 s timeout.
+/// Single stop for both fetches together, keeping them inside the app's 75 s timeout.
 const BUDGET: Duration = Duration::from_secs(60);
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -182,27 +181,38 @@ pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Err
 
     tracing::debug!(?manifest_url, ?sig_url, "downloading update manifest and signature");
 
-    let deadline = Instant::now() + BUDGET;
-    let manifest_bytes = fetch(client, &manifest_url, deadline, BACKOFF).await?;
-    let sig_bytes = fetch(client, &sig_url, deadline, BACKOFF).await?;
-
-    verify_and_parse(&manifest_bytes, &sig_bytes)
+    download_from(client, &manifest_url, &sig_url, BUDGET).await
 }
 
-async fn fetch(client: &Client, url: &Url, deadline: Instant, backoff: ExponentialBuilder) -> Result<Vec<u8>, Error> {
-    (|| get_bytes(client, url, deadline))
+// Cancelling mid-fetch is safe: the bytes only live in memory.
+async fn download_from(
+    client: &Client,
+    manifest_url: &Url,
+    sig_url: &Url,
+    budget: Duration,
+) -> Result<Manifest, Error> {
+    tokio::time::timeout(budget, async {
+        let manifest_bytes = fetch(client, manifest_url, BACKOFF).await?;
+        let sig_bytes = fetch(client, sig_url, BACKOFF).await?;
+        verify_and_parse(&manifest_bytes, &sig_bytes)
+    })
+    .await
+    .map_err(|_| Error::Other("manifest fetch timed out".into()))?
+}
+
+async fn fetch(client: &Client, url: &Url, backoff: ExponentialBuilder) -> Result<Vec<u8>, Error> {
+    (|| get_bytes(client, url))
         .retry(backoff)
         .when(is_retryable)
-        .adjust(|_, delay| delay.filter(|d| Instant::now() + *d < deadline))
         .notify(|e, delay| tracing::warn!(%url, error = %e, ?delay, "manifest fetch failed — retrying"))
         .await
         .map_err(|e| Error::Other(e.to_string()))
 }
 
-async fn get_bytes(client: &Client, url: &Url, deadline: Instant) -> reqwest::Result<Vec<u8>> {
+async fn get_bytes(client: &Client, url: &Url) -> reqwest::Result<Vec<u8>> {
     let response = client
         .get(url.clone())
-        .timeout(REQUEST_TIMEOUT.min(deadline.saturating_duration_since(Instant::now())))
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await?
         .error_for_status()?;
@@ -309,11 +319,10 @@ mod tests {
     // in verify_and_parse; it needs a second signed macOS fixture to use as the
     // wrong signature.
 
-    async fn fetch_from(addr: SocketAddr, backoff_ms: u64, budget_ms: u64) -> Result<Vec<u8>, Error> {
+    async fn fetch_from(addr: SocketAddr, backoff_ms: u64) -> Result<Vec<u8>, Error> {
         let url = Url::parse(&format!("http://{addr}/{MANIFEST_FILENAME}")).unwrap();
         let backoff = BACKOFF.with_min_delay(Duration::from_millis(backoff_ms));
-        let deadline = Instant::now() + Duration::from_millis(budget_ms);
-        fetch(&test_client(), &url, deadline, backoff).await
+        fetch(&test_client(), &url, backoff).await
     }
 
     fn request_count(rx: &mut UnboundedReceiver<String>) -> usize {
@@ -329,7 +338,7 @@ mod tests {
         let ok = http_response("200 OK", &[], 2, b"{}");
         let (addr, mut rx) = spawn_server(vec![unavailable(), unavailable(), ok], AfterScript::CloseConnections).await;
 
-        let bytes = fetch_from(addr, 10, 5000).await.unwrap();
+        let bytes = fetch_from(addr, 10).await.unwrap();
 
         assert_eq!(bytes, b"{}");
         assert_eq!(request_count(&mut rx), 3);
@@ -339,7 +348,7 @@ mod tests {
     async fn gives_up_after_max_attempts() {
         let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
 
-        let err = fetch_from(addr, 10, 5000).await.unwrap_err();
+        let err = fetch_from(addr, 10).await.unwrap_err();
 
         assert!(err.to_string().contains("503"), "got: {err}");
         assert_eq!(request_count(&mut rx), 5);
@@ -351,7 +360,7 @@ mod tests {
         let ok = http_response("200 OK", &[], 2, b"{}");
         let (addr, mut rx) = spawn_server(vec![cut, ok], AfterScript::CloseConnections).await;
 
-        let bytes = fetch_from(addr, 10, 5000).await.unwrap();
+        let bytes = fetch_from(addr, 10).await.unwrap();
 
         assert_eq!(bytes, b"{}");
         assert_eq!(request_count(&mut rx), 2);
@@ -363,19 +372,23 @@ mod tests {
         let ok = http_response("200 OK", &[], 2, b"{}");
         let (addr, mut rx) = spawn_server(vec![not_found, ok], AfterScript::CloseConnections).await;
 
-        let bytes = fetch_from(addr, 10, 5000).await.unwrap();
+        let bytes = fetch_from(addr, 10).await.unwrap();
 
         assert_eq!(bytes, b"{}");
         assert_eq!(request_count(&mut rx), 2);
     }
 
+    // The budget expires during the first backoff sleep, so only one request lands.
     #[tokio::test]
     async fn stops_when_budget_exhausted() {
         let (addr, mut rx) = spawn_server(vec![unavailable()], AfterScript::RepeatLastResponse).await;
+        let url = Url::parse(&format!("http://{addr}/{MANIFEST_FILENAME}")).unwrap();
 
-        let err = fetch_from(addr, 500, 250).await.unwrap_err();
+        let err = download_from(&test_client(), &url, &url, Duration::from_millis(250))
+            .await
+            .unwrap_err();
 
-        assert!(err.to_string().contains("503"), "got: {err}");
+        assert!(err.to_string().contains("timed out"), "got: {err}");
         assert_eq!(request_count(&mut rx), 1);
     }
 }

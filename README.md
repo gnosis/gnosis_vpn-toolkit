@@ -115,9 +115,11 @@ the manifest. Two consequences worth knowing:
   consumers must treat it as optional rather than required.
 
 The manifest and its `.asc` are each fetched up to 5 times, retrying network
-errors and any HTTP error status with a backoff starting at 1 s. All attempts
-share one 60 s budget, which keeps `check-update` inside the app's 75 s
-timeout. Retries are logged to stderr only; stdout still carries one result.
+errors and any HTTP error status with a backoff starting at 1 s. Both fetches
+together get one 60 s budget, which keeps `check-update` inside the app's 75 s
+timeout; exhausting it aborts the check with a timeout error, and the causes of
+the individual attempts are in the stderr log. Retries are logged to stderr
+only; stdout still carries one result.
 
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
