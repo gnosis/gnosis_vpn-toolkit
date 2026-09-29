@@ -1,5 +1,3 @@
-//! Scripted HTTP/1.1 server shared by the network tests.
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -7,17 +5,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
-/// What the scripted server does with connections beyond its script.
 pub(crate) enum AfterScript {
-    /// Accept and close without responding — the "server stays down" case.
     CloseConnections,
-    /// Keep replaying the last scripted response.
     RepeatLastResponse,
 }
 
-/// Minimal scripted HTTP/1.1 server: one raw response per connection, then
-/// close. Each received request head is forwarded (lowercased) so tests can
-/// assert on request headers and count requests.
 pub(crate) async fn spawn_server(script: Vec<Vec<u8>>, after: AfterScript) -> (SocketAddr, UnboundedReceiver<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -63,8 +55,7 @@ pub(crate) async fn spawn_server(script: Vec<Vec<u8>>, after: AfterScript) -> (S
     (addr, rx)
 }
 
-/// Build a raw response; advertising more bytes than `body` carries makes
-/// the client see a mid-body connection drop.
+// A larger advertised length simulates a mid-body connection drop.
 pub(crate) fn http_response(status: &str, headers: &[(&str, String)], advertised_len: usize, body: &[u8]) -> Vec<u8> {
     let mut head = format!("HTTP/1.1 {status}\r\n");
     for (name, value) in headers {

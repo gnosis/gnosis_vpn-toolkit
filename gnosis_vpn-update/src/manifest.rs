@@ -44,17 +44,13 @@ const MANIFEST_BASE_URL_STABLE: &str = "https://download.vpn.gnosis.eth.limo/man
 /// days (experimental), and nightly builds need what shipped minutes ago.
 const MANIFEST_BASE_URL_PRERELEASE: &str = "https://download.gnosisvpn.io/manifests/";
 
-/// Per-attempt deadline for the small in-memory manifest/signature fetches.
-/// The shared client deliberately has no total timeout (the artifact download
-/// must be allowed to run long), so these bounded fetches set their own;
-/// `RetryPolicy::budget` caps all attempts together.
+/// Bound each fetch without imposing a timeout on artifact downloads via the shared client.
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct RetryPolicy {
     max_attempts: u32,
-    /// Sleep after the first failed attempt; doubles after each further one.
     backoff: Duration,
-    /// Shared by both files: keeps `check-update` under the app's 75 s kill.
+    /// Keep both fetches inside the app's 75 s timeout.
     budget: Duration,
 }
 
@@ -199,8 +195,6 @@ pub async fn download(client: &Client, channel: Channel) -> Result<Manifest, Err
     verify_and_parse(&manifest_bytes, &sig_bytes)
 }
 
-/// GET `url` into memory, retrying failures until the policy's
-/// attempts or `deadline` run out.
 async fn fetch(client: &Client, url: &Url, deadline: Instant, policy: &RetryPolicy) -> Result<Vec<u8>, Error> {
     let mut backoff = policy.backoff;
     let mut attempt = 0;
@@ -230,8 +224,7 @@ async fn get_bytes(client: &Client, url: &Url, timeout: Duration) -> reqwest::Re
     Ok(response.bytes().await?.into())
 }
 
-/// Builder/redirect errors are structural and a retry cannot fix them; every
-/// other failure is retried, any HTTP error status included.
+// Builder and redirect errors cannot be fixed by retrying.
 fn is_retryable(e: &reqwest::Error) -> bool {
     !(e.is_builder() || e.is_redirect())
 }
