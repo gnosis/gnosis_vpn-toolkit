@@ -99,6 +99,7 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
         (Err(e), _) | (_, Err(e)) => CheckResult {
             channel: args.channel.map(Into::into).unwrap_or(Channel::Stable),
             outcome: CheckOutcome::Error(e),
+            end_of_life: None,
             manifest: None,
         },
     };
