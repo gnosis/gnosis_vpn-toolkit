@@ -30,7 +30,7 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
-use crate::manifest::{self, Channel, ChannelRelease};
+use crate::manifest::{self, Channel, ChannelRelease, EndOfLife, Manifest};
 
 /// Shown when there is no install engine. Copied from the app's "How to update"
 /// modal and the installer's apt path — keep the three in step.
@@ -125,6 +125,20 @@ pub fn channel_of_version(version: &str) -> Channel {
 
 /// The version segment the publishing pipeline appends to experimental builds.
 const EXPERIMENTAL_SEGMENT: &str = "experimental";
+
+/// The earliest-ending EOL entry covering `current_version`, if any. Entries come
+/// from the installed version's own channel, since they use its version scheme.
+pub fn end_of_life_for(manifest: &Manifest, current_version: &str) -> Option<EndOfLife> {
+    let channel = channel_of_version(current_version);
+    manifest
+        .pick(channel)?
+        .end_of_life
+        .iter()
+        .filter(|eol| channel_of_version(&eol.version) == channel)
+        .filter(|eol| compare_components(current_version, &eol.version) != Ordering::Greater)
+        .min_by_key(|eol| eol.ends_at)
+        .cloned()
+}
 
 /// Validate a candidate release against the installed version. Cross-channel
 /// switches skip every gate (incomparable schemes); `min_os_version` is not read.
@@ -254,6 +268,9 @@ pub struct CheckResult {
     /// from the installed version (see [`channel_of_version`]).
     pub channel: Channel,
     pub outcome: CheckOutcome,
+    /// Present only when the installed version is covered, see [`end_of_life_for`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_of_life: Option<EndOfLife>,
     /// `default` is required alongside `skip_serializing_if` so the type still
     /// deserializes when the key is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -262,19 +279,14 @@ pub struct CheckResult {
 
 impl std::fmt::Display for CheckResult {
     /// The decision, the installed package version and the channel it was
-    /// checked on — plus the chosen channel's changelog when one is offered.
+    /// checked on — plus the end of life when the installed version is covered,
+    /// and the chosen channel's changelog when one is offered.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.outcome {
             CheckOutcome::Available { current, release } => {
                 writeln!(f, "Update needed to {}", release.version)?;
                 writeln!(f, "Current installed version: {current}")?;
-                write!(f, "Channel: {}", self.channel.title())?;
-                // Only stable carries notes today; an empty label reads as a bug.
-                let notes = release.release_notes.trim();
-                if !notes.is_empty() {
-                    write!(f, "\nChangelog: {notes}")?;
-                }
-                Ok(())
+                write!(f, "Channel: {}", self.channel.title())
             }
             CheckOutcome::UpToDate { current } => {
                 writeln!(f, "Currently on latest version")?;
@@ -287,7 +299,22 @@ impl std::fmt::Display for CheckResult {
             CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass"),
             CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}"),
             CheckOutcome::Error(e) => write!(f, "Error: {e}"),
+        }?;
+        // Ahead of the changelog, which can run to many lines.
+        if let Some(eol) = &self.end_of_life {
+            write!(f, "\nEnd of life: {}", eol.ends_at)?;
+            if !eol.reason.trim().is_empty() {
+                write!(f, "\nReason: {}", eol.reason.trim())?;
+            }
         }
+        if let CheckOutcome::Available { release, .. } = &self.outcome {
+            // Only stable carries notes today; an empty label reads as a bug.
+            let notes = release.release_notes.trim();
+            if !notes.is_empty() {
+                write!(f, "\nChangelog: {notes}")?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -303,6 +330,7 @@ pub async fn check(
     let bare = |outcome| CheckResult {
         channel,
         outcome,
+        end_of_life: None,
         manifest: None,
     };
 
@@ -337,6 +365,7 @@ pub async fn check(
     CheckResult {
         channel,
         outcome,
+        end_of_life: end_of_life_for(&manifest, current_version),
         manifest: Some(manifest),
     }
 }
@@ -910,6 +939,7 @@ mod tests {
             release_notes: String::new(),
             min_os_version: min_os.to_string(),
             min_app_version: min_app.to_string(),
+            end_of_life: Vec::new(),
         }
     }
 
@@ -937,6 +967,7 @@ mod tests {
                 current: "0.77.0".to_string(),
                 release: Box::new(stable.clone()),
             },
+            end_of_life: None,
             manifest: Some(manifest_with(Some(stable), Some(snapshot))),
         }
     }
@@ -1036,6 +1067,7 @@ mod tests {
                 current: "2026.06.06+build.000005".to_string(),
                 release: Box::new(rel),
             },
+            end_of_life: None,
             manifest: None,
         };
         assert_eq!(
@@ -1057,6 +1089,7 @@ mod tests {
                 current: "2026.06.06+build.000005".to_string(),
                 release: Box::new(release("2026.09.20+build.012829", "0.77.0", "14.0")),
             },
+            end_of_life: None,
             manifest: None,
         };
         assert!(!r.to_string().contains("Changelog"), "got: {r}");
@@ -1069,6 +1102,7 @@ mod tests {
             outcome: CheckOutcome::UpToDate {
                 current: "0.95.0".to_string(),
             },
+            end_of_life: None,
             manifest: None,
         };
         assert_eq!(
@@ -1081,6 +1115,7 @@ mod tests {
         let no_release = CheckResult {
             channel: Channel::Experimental,
             outcome: CheckOutcome::NoReleaseForChannel(Channel::Experimental),
+            end_of_life: None,
             manifest: None,
         };
         assert_eq!(no_release.to_string(), "No release published on Experimental");
@@ -1301,6 +1336,7 @@ mod tests {
             outcome: CheckOutcome::UpToDate {
                 current: "0.78.0".to_string(),
             },
+            end_of_life: None,
             manifest: Some(manifest_with(Some(stable.clone()), Some(snapshot))),
         };
         let v = json_of(&up_to_date);
@@ -1314,6 +1350,7 @@ mod tests {
         let no_release = CheckResult {
             channel: Channel::Snapshot,
             outcome: CheckOutcome::NoReleaseForChannel(Channel::Snapshot),
+            end_of_life: None,
             manifest: Some(manifest_with(Some(stable), None)),
         };
         let v = json_of(&no_release);
@@ -1333,6 +1370,7 @@ mod tests {
             let v = json_of(&CheckResult {
                 channel: Channel::Stable,
                 outcome,
+                end_of_life: None,
                 manifest: None,
             });
             assert!(v.get("manifest").is_none(), "manifest key should be absent: {v}");
@@ -1342,6 +1380,7 @@ mod tests {
         let v = json_of(&CheckResult {
             channel: Channel::Stable,
             outcome: CheckOutcome::VpnNotConnected,
+            end_of_life: None,
             manifest: None,
         });
         assert_eq!(v["outcome"], "VpnNotConnected");
@@ -1391,11 +1430,186 @@ mod tests {
             let rendered = CheckResult {
                 channel: Channel::Stable,
                 outcome,
+                end_of_life: None,
                 manifest: None,
             }
             .to_string();
             assert_eq!(rendered.lines().count(), 1, "{rendered}");
         }
+    }
+
+    fn eol(version: &str, ends_at: &str) -> EndOfLife {
+        EndOfLife {
+            version: version.to_string(),
+            ends_at: ends_at.parse().unwrap(),
+            reason: "legacy endpoints shut down".to_string(),
+        }
+    }
+
+    fn with_eol(mut release: ChannelRelease, entries: Vec<EndOfLife>) -> ChannelRelease {
+        release.end_of_life = entries;
+        release
+    }
+
+    #[test]
+    fn end_of_life_for_matches_only_covered_versions() {
+        let m = manifest_with(
+            Some(with_eol(
+                release("0.95.2", "0.77.0", "14.0"),
+                vec![eol("0.92.0", "2026-10-15T00:00:00Z")],
+            )),
+            Some(with_eol(
+                release("2026.10.02+build.070036", "0.77.0", "14.0"),
+                vec![eol("2026.08.17+build.122640", "2026-10-15T00:00:00Z")],
+            )),
+        );
+
+        for covered in ["0.92.0", "0.90.1", "2026.08.17+build.122640", "2026.08.16+build.235959"] {
+            assert!(end_of_life_for(&m, covered).is_some(), "{covered} should be covered");
+        }
+        for newer in ["0.92.1", "0.95.2", "2026.08.17+build.122641", "2026.10.02+build.070036"] {
+            assert_eq!(end_of_life_for(&m, newer), None, "{newer} should not be covered");
+        }
+        assert_eq!(
+            end_of_life_for(&m, "2026.08.17+build.122640").unwrap().version,
+            "2026.08.17+build.122640",
+        );
+    }
+
+    #[test]
+    fn end_of_life_for_picks_the_earliest_covering_entry() {
+        let m = manifest_with(
+            Some(with_eol(
+                release("0.95.2", "0.77.0", "14.0"),
+                vec![
+                    eol("0.92.0", "2026-12-01T00:00:00Z"),
+                    eol("0.93.0", "2026-11-01T00:00:00Z"),
+                    // ends first, but 0.85.0 is above it
+                    eol("0.80.0", "2026-10-01T00:00:00Z"),
+                ],
+            )),
+            None,
+        );
+        assert_eq!(
+            end_of_life_for(&m, "0.85.0"),
+            Some(eol("0.93.0", "2026-11-01T00:00:00Z"))
+        );
+    }
+
+    #[test]
+    fn end_of_life_for_ignores_other_schemes_and_missing_entries() {
+        // A snapshot-scheme entry sorts above every stable version; it must not match.
+        let mixed = manifest_with(
+            Some(with_eol(
+                release("0.95.2", "0.77.0", "14.0"),
+                vec![eol("2026.08.17+build.122640", "2026-10-15T00:00:00Z")],
+            )),
+            None,
+        );
+        assert_eq!(end_of_life_for(&mixed, "0.95.0"), None);
+        // The installed version's channel has no entry at all.
+        assert_eq!(end_of_life_for(&mixed, "2026.08.01+build.000001"), None);
+        assert_eq!(end_of_life_for(&mixed, "2026.08.01+build.000001.experimental"), None);
+        // Schema v1: no lists.
+        let v1 = manifest_with(Some(release("0.95.2", "0.77.0", "14.0")), None);
+        assert_eq!(end_of_life_for(&v1, "0.50.0"), None);
+    }
+
+    #[test]
+    fn v2_manifest_entries_parse_end_of_life() {
+        let m: manifest::Manifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "generated_at": "2026-10-02T07:07:34Z",
+            "channels": {
+                "stable": {
+                    "version": "0.95.2",
+                    "published_at": "2026-10-01T00:00:00Z",
+                    "download_url": "https://download.gnosisvpn.io/stable/gnosisvpn_amd64.deb",
+                    "size_bytes": 28369426,
+                    "sha256": "b839afa4f389249d969f9f2be98720e8d3a3cc6b4f085a1ff54ab312950116fa",
+                    "artifact_signature": "sig",
+                    "release_notes": "",
+                    "min_os_version": "",
+                    "min_app_version": "0.77.0",
+                    "end_of_life": [
+                        { "version": "0.92.0", "ends_at": "2026-10-15T00:00:00Z", "reason": "legacy endpoints shut down" }
+                    ]
+                },
+                "snapshot": null
+            }
+        }))
+        .expect("a v2 manifest must parse");
+        let stable = m.pick(Channel::Stable).expect("stable");
+        assert_eq!(stable.end_of_life, vec![eol("0.92.0", "2026-10-15T00:00:00Z")]);
+    }
+
+    #[test]
+    fn check_result_emits_only_the_covering_end_of_life() {
+        let entries = vec![
+            eol("0.92.0", "2026-10-15T00:00:00Z"),
+            eol("0.60.0", "2026-09-01T00:00:00Z"),
+        ];
+        let stable = with_eol(release("0.95.2", "0.77.0", "14.0"), entries);
+        let manifest = manifest_with(Some(stable.clone()), None);
+        let v = json_of(&CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::Available {
+                current: "0.91.0".to_string(),
+                release: Box::new(stable),
+            },
+            end_of_life: end_of_life_for(&manifest, "0.91.0"),
+            manifest: Some(manifest),
+        });
+
+        assert_eq!(v["end_of_life"]["version"], "0.92.0");
+        assert_eq!(v["end_of_life"]["ends_at"], "2026-10-15T00:00:00Z");
+        assert_eq!(v["end_of_life"]["reason"], "legacy endpoints shut down");
+        // The raw lists, including the entry that does not cover 0.91.0, stay off the wire.
+        assert!(v["manifest"]["channels"]["stable"].get("end_of_life").is_none(), "{v}");
+        assert!(v["outcome"]["Available"]["release"].get("end_of_life").is_none(), "{v}");
+        assert!(!v.to_string().contains("0.60.0"), "{v}");
+    }
+
+    #[test]
+    fn plain_check_shows_end_of_life_only_when_covered() {
+        let mut rel = release("0.95.2", "0.77.0", "14.0");
+        rel.release_notes = "fixed the thing".to_string();
+        let mut r = CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::Available {
+                current: "0.92.0".to_string(),
+                release: Box::new(rel),
+            },
+            end_of_life: Some(eol("0.92.0", "2026-10-15T00:00:00Z")),
+            manifest: None,
+        };
+        assert_eq!(
+            r.to_string(),
+            "Update needed to 0.95.2\n\
+             Current installed version: 0.92.0\n\
+             Channel: Stable\n\
+             End of life: 2026-10-15 00:00:00 UTC\n\
+             Reason: legacy endpoints shut down\n\
+             Changelog: fixed the thing",
+        );
+
+        r.end_of_life = None;
+        assert!(!r.to_string().contains("End of life"), "{r}");
+
+        let up_to_date = CheckResult {
+            channel: Channel::Stable,
+            outcome: CheckOutcome::UpToDate {
+                current: "0.92.0".to_string(),
+            },
+            end_of_life: Some(eol("0.92.0", "2026-10-15T00:00:00Z")),
+            manifest: None,
+        };
+        assert!(
+            up_to_date
+                .to_string()
+                .ends_with("Channel: Stable\nEnd of life: 2026-10-15 00:00:00 UTC\nReason: legacy endpoints shut down"),
+            "{up_to_date}",
+        );
     }
 
     #[test]

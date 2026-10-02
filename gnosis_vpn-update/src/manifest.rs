@@ -124,6 +124,18 @@ pub struct ChannelRelease {
     pub release_notes: String,
     pub min_os_version: String,
     pub min_app_version: String,
+    /// Absent before schema v2. Never re-emitted: callers only get the entry that
+    /// covers the installed version, see [`crate::update::end_of_life_for`].
+    #[serde(default, skip_serializing)]
+    pub end_of_life: Vec<EndOfLife>,
+}
+
+/// Installs on the channel at or below `version` stop working at `ends_at`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndOfLife {
+    pub version: String,
+    pub ends_at: Timestamp,
+    pub reason: String,
 }
 
 #[derive(Debug, thiserror::Error)]

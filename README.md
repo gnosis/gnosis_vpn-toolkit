@@ -23,17 +23,23 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   - `update` streams `UpdateStatus` events (`Checking`, `Downloading`,
     `Installing`, then a terminal `Completed` or `Failed`).
   - `check-update` prints a single result object
-    `{"channel": …, "outcome": …, "manifest": …}`. `outcome` is the gated
-    decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
+    `{"channel": …, "outcome": …, "end_of_life": …, "manifest": …}`. `outcome`
+    is the gated decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
     `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
     was checked — the `--channel` value, or the channel inferred from the
-    installed version. `manifest` is the update manifest exactly as fetched,
-    carrying **every** channel entry — `channels.stable`,
-    `channels.snapshot` and `channels.experimental` — so one
-    invocation yields the whole release picture as well as the decision; it is
-    omitted on the three outcomes that never got a manifest
-    (`VpnNotConnected`, `IntegrityError`, `Error`), where a consumer should
-    keep its last known one.
+    installed version. `manifest` is the update manifest as fetched, carrying
+    **every** channel entry — `channels.stable`, `channels.snapshot` and
+    `channels.experimental` — so one invocation yields the whole release
+    picture as well as the decision; it is omitted on the three outcomes that
+    never got a manifest (`VpnNotConnected`, `IntegrityError`, `Error`), where
+    a consumer should keep its last known one.
+  - `end_of_life` is `{"version": …, "ends_at": …, "reason": …}`: the
+    manifest's end-of-life entry that covers the installed version (same
+    version scheme, installed `<=` `version`; the earliest `ends_at` when
+    several do). It is omitted when no entry covers the installed version or
+    no manifest was fetched. The manifest's raw per-channel `end_of_life`
+    lists are never re-emitted, so nothing in the output describes an end of
+    life that does not apply.
   - `version` prints `{"version": "…", "package_version": "…"}`, where
     `package_version` is the installed client version from
     `/etc/gnosisvpn/version.txt` (`null` when the client is not installed).
@@ -42,7 +48,8 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   Nothing a caller is meant to parse goes there, in either format.
 
   `check-update` prints the chosen channel's changelog only when the release
-  carries one (today only stable does).
+  carries one (today only stable does), and `End of life` / `Reason` lines
+  only when the installed version is covered.
 
   ```console
   $ gnosis_vpn-update version
