@@ -7,8 +7,9 @@ module docs in `src/` for the engine details.
 
 `check-update` instead prints a single object — the checked `channel`, the
 gated `outcome`, the `end_of_life` covering the installed version (omitted when
-none does), and the full update `manifest` with **both** channel entries — so
-the app can render the complete release picture from one invocation.
+none does), and the update `manifest` with every channel entry (stable,
+snapshot, experimental) minus their raw `end_of_life` lists — so the app can
+render the complete release picture from one invocation.
 
 The install engine is **macOS-only**: `check-update` and `version` work the same
 on Linux, but `update` there refuses immediately and prints the apt commands

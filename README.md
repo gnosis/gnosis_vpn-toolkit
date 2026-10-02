@@ -27,12 +27,14 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
     is the gated decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
     `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
     was checked — the `--channel` value, or the channel inferred from the
-    installed version. `manifest` is the update manifest as fetched, carrying
+    installed version. `manifest` is the fetched update manifest, carrying
     **every** channel entry — `channels.stable`, `channels.snapshot` and
-    `channels.experimental` — so one invocation yields the whole release
-    picture as well as the decision; it is omitted on the three outcomes that
-    never got a manifest (`VpnNotConnected`, `IntegrityError`, `Error`), where
-    a consumer should keep its last known one.
+    `channels.experimental` — but not their raw `end_of_life` lists (see
+    below), so one invocation yields the whole release picture as well as the
+    decision. It is omitted when no manifest was fetched (`VpnNotConnected`,
+    `IntegrityError`, and an `Error` raised before or during the fetch), where
+    a consumer should keep its last known one; the `Error` for an app too old
+    to update directly comes after the fetch and still carries it.
   - `end_of_life` is `{"version": …, "ends_at": …, "reason": …}`: the
     manifest's end-of-life entry that covers the installed version (same
     version scheme, installed `<=` `version`; the earliest `ends_at` when
