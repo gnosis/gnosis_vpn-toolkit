@@ -55,7 +55,7 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
 
   ```console
   $ gnosis_vpn-update version
-  Updater version: 0.4.0
+  Updater version: 0.5.0
   Package version: 2026.06.06+build.000005
 
   $ gnosis_vpn-update check-update
