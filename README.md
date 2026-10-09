@@ -27,7 +27,10 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
     is the gated decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
     `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
     was checked — the `--channel` value, or the channel inferred from the
-    installed version. `manifest` is the fetched update manifest, carrying
+    installed version. `UpToDate`, `Available` and `NoReleaseForChannel` name
+    the installed version they were reached for as `current` (older toolkits
+    sent `NoReleaseForChannel` as the bare channel name). `manifest` is the
+    fetched update manifest, carrying
     **every** channel entry — `channels.stable`, `channels.snapshot` and
     `channels.experimental` — but not their raw `end_of_life` lists (see
     below), so one invocation yields the whole release picture as well as the

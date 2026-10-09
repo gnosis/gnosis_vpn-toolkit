@@ -186,7 +186,7 @@ fn emit_status(format: OutputFormat, status: &UpdateStatus) {
 fn exit_for_check(result: &CheckResult) -> ExitCode {
     match &result.outcome {
         CheckOutcome::UpToDate { .. } | CheckOutcome::Available { .. } => exitcode::OK,
-        CheckOutcome::NoReleaseForChannel(_) => exitcode::UNAVAILABLE,
+        CheckOutcome::NoReleaseForChannel { .. } => exitcode::UNAVAILABLE,
         CheckOutcome::VpnNotConnected => exitcode::NOPERM,
         CheckOutcome::IntegrityError(_) => exitcode::SOFTWARE,
         CheckOutcome::Error(_) => exitcode::UNAVAILABLE,
