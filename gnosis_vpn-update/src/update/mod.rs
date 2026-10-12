@@ -254,7 +254,11 @@ pub enum CheckOutcome {
         current: String,
         release: Box<ChannelRelease>,
     },
-    NoReleaseForChannel(Channel),
+    /// Names `current` like the two above, so a consumer can tell when the verdict went stale.
+    NoReleaseForChannel {
+        current: String,
+        channel: Channel,
+    },
     VpnNotConnected,
     IntegrityError(String),
     Error(String),
@@ -293,8 +297,9 @@ impl std::fmt::Display for CheckResult {
                 writeln!(f, "Current installed version: {current}")?;
                 write!(f, "Channel: {}", self.channel.title())
             }
-            CheckOutcome::NoReleaseForChannel(channel) => {
-                write!(f, "No release published on {}", channel.title())
+            CheckOutcome::NoReleaseForChannel { current, channel } => {
+                writeln!(f, "No release published on {}", channel.title())?;
+                write!(f, "Current installed version: {current}")
             }
             CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass"),
             CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}"),
@@ -347,7 +352,10 @@ pub async fn check(
     // `pick` borrows `manifest`; cloning the candidate ends that borrow so the
     // whole manifest can be moved into the result below.
     let outcome = match manifest.pick(channel).cloned() {
-        None => CheckOutcome::NoReleaseForChannel(channel),
+        None => CheckOutcome::NoReleaseForChannel {
+            current: current_version.to_string(),
+            channel,
+        },
         Some(release) => match ensure_installable(&release, current_version, channel, false) {
             Ok(_) => CheckOutcome::Available {
                 current: current_version.to_string(),
@@ -1114,11 +1122,18 @@ mod tests {
 
         let no_release = CheckResult {
             channel: Channel::Experimental,
-            outcome: CheckOutcome::NoReleaseForChannel(Channel::Experimental),
+            outcome: CheckOutcome::NoReleaseForChannel {
+                current: "2026.08.01+build.000001.experimental".to_string(),
+                channel: Channel::Experimental,
+            },
             end_of_life: None,
             manifest: None,
         };
-        assert_eq!(no_release.to_string(), "No release published on Experimental");
+        assert_eq!(
+            no_release.to_string(),
+            "No release published on Experimental\n\
+             Current installed version: 2026.08.01+build.000001.experimental",
+        );
     }
 
     #[test]
@@ -1349,13 +1364,20 @@ mod tests {
         // An empty channel still fetched a manifest, so it still reports one.
         let no_release = CheckResult {
             channel: Channel::Snapshot,
-            outcome: CheckOutcome::NoReleaseForChannel(Channel::Snapshot),
+            outcome: CheckOutcome::NoReleaseForChannel {
+                current: "2026.04.20+build.000001".to_string(),
+                channel: Channel::Snapshot,
+            },
             end_of_life: None,
             manifest: Some(manifest_with(Some(stable), None)),
         };
         let v = json_of(&no_release);
         assert_eq!(v["channel"], "snapshot");
-        assert_eq!(v["outcome"]["NoReleaseForChannel"], "snapshot");
+        assert_eq!(v["outcome"]["NoReleaseForChannel"]["channel"], "snapshot");
+        assert_eq!(
+            v["outcome"]["NoReleaseForChannel"]["current"],
+            "2026.04.20+build.000001"
+        );
         assert!(v["manifest"]["channels"]["stable"].is_object());
         assert!(v["manifest"]["channels"]["snapshot"].is_null());
     }
