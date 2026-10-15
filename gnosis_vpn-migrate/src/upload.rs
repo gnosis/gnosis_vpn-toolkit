@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
+use url::Url;
 use zstd::stream::Encoder;
 
 pub const DEFAULT_API_URL: &str = "https://log-uploader.gnosisvpn.com/api/upload";
@@ -121,6 +122,7 @@ pub async fn send(
         .await
         .map_err(|e| format!("cannot read upload response: {e}"))?;
     let signed = parse_upload_response(status, &body)?;
+    reject_transport_downgrade(api_url, &signed.url)?;
 
     let mut put = client.put(&signed.url).body(bundle);
     for (name, value) in &signed.headers {
@@ -136,6 +138,16 @@ pub async fn send(
         "Cloud Storage rejected the upload (HTTP {}): {body}",
         status.as_u16()
     ))
+}
+
+// The bundle holds installer logs; a signed URL must not fall back to plain http (allowed only for local test servers).
+fn reject_transport_downgrade(api_url: &str, put_url: &str) -> Result<(), String> {
+    let api_is_https = Url::parse(api_url).is_ok_and(|u| u.scheme() == "https");
+    let put_is_https = Url::parse(put_url).is_ok_and(|u| u.scheme() == "https");
+    if api_is_https && !put_is_https {
+        return Err("the log uploader returned a non-https storage URL; refusing to upload".to_string());
+    }
+    Ok(())
 }
 
 fn send_error(target: &str, e: reqwest::Error) -> String {
@@ -192,6 +204,13 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc::{Receiver, channel};
     use std::thread;
+
+    #[test]
+    fn https_api_refuses_a_plain_http_storage_url() {
+        assert!(reject_transport_downgrade("https://api/upload", "http://storage/obj").is_err());
+        assert!(reject_transport_downgrade("https://api/upload", "https://storage/obj").is_ok());
+        assert!(reject_transport_downgrade("http://127.0.0.1:1/api", "http://127.0.0.1:1/obj").is_ok());
+    }
 
     const UUID: &str = "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d";
 
