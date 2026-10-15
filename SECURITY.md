@@ -2,8 +2,8 @@
 
 ## Binary Verification
 
-All `gnosis_vpn-update` release binaries ship with a SHA256 checksum.
-Additionally:
+All toolkit release binaries — `gnosis_vpn-update` and `gnosis_vpn-migrate`,
+each as `<name>-<arch>` — ship with a SHA256 checksum. Additionally:
 
 - **Linux binaries** (`x86_64-linux`, `aarch64-linux`) are signed with GPG
 - **macOS binaries** (`aarch64-darwin`) use Apple's code signing mechanism and
