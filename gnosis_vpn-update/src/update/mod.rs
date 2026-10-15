@@ -4,7 +4,7 @@
 //! socket IPC. The engine ([`install_engine`]) drives the
 //! download → verify → install pipeline and emits [`UpdateStatus`] on a tokio
 //! mpsc channel; the binary forwards each status to stdout as newline-delimited
-//! JSON (see [`crate::output`]) instead of over a socket.
+//! JSON (see `gnosis_vpn_toolkit_common::output`) instead of over a socket.
 //!
 //! The engine downloads a signed `.pkg`, SHA-256-verifies it, and runs
 //! `installer(8)`. macOS only.
@@ -59,19 +59,8 @@ pub enum GateError {
     AlreadyInstalled { candidate: String },
 }
 
-/// Read the currently-installed client version from the version file the
-/// installer writes (see [`paths::installed_version_path`]). Surrounding
-/// whitespace/newline is trimmed; a missing or empty file is an error — the
-/// updater cannot gate already-installed/downgrade without it.
-pub fn read_installed_version(path: &std::path::Path) -> Result<String, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read installed version from {}: {e}", path.display()))?;
-    let version = raw.trim();
-    if version.is_empty() {
-        return Err(format!("installed version file {} is empty", path.display()));
-    }
-    Ok(version.to_string())
-}
+// Kept at this path for the engine's callers; the reader itself is toolkit-wide.
+pub use gnosis_vpn_toolkit_common::package_version::read_installed_version;
 
 /// Componentwise compare for version-like strings.
 ///
@@ -981,21 +970,6 @@ mod tests {
 
     fn json_of(result: &CheckResult) -> serde_json::Value {
         serde_json::to_value(result).expect("serialize CheckResult")
-    }
-
-    #[test]
-    fn read_installed_version_trims_and_rejects_missing_or_empty() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("gnosis_vpn-update-test-version-{}.txt", std::process::id()));
-
-        std::fs::write(&path, "0.91.1\n").unwrap();
-        assert_eq!(read_installed_version(&path).unwrap(), "0.91.1");
-
-        std::fs::write(&path, "  \n").unwrap();
-        assert!(read_installed_version(&path).unwrap_err().contains("empty"));
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(read_installed_version(&path).unwrap_err().contains("cannot read"));
     }
 
     #[tokio::test]

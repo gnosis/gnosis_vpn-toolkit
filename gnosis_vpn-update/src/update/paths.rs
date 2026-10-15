@@ -28,11 +28,7 @@ pub fn audit_log_path() -> PathBuf {
     PathBuf::from("/var/log/gnosisvpn/updates.log")
 }
 
-/// Version file written by the client installer (both the macOS `.pkg` and the
-/// Linux packages write the installed package version here).
-pub fn installed_version_path() -> PathBuf {
-    PathBuf::from("/etc/gnosisvpn/version.txt")
-}
+pub use gnosis_vpn_toolkit_common::package_version::installed_version_path;
 
 /// Active client config, maintained by the installer as a symlink to the
 /// chosen network's config (e.g. `rotsee.toml`).
