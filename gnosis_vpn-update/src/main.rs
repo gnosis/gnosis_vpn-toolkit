@@ -3,16 +3,16 @@ use std::time::Duration;
 
 use exitcode::{self, ExitCode};
 
+use gnosis_vpn_toolkit_common::{logging, output};
 use gnosis_vpn_update::cli::{self, Command, OutputFormat};
 use gnosis_vpn_update::manifest::Channel;
 #[cfg(target_os = "macos")]
 use gnosis_vpn_update::update::EngineInput;
 use gnosis_vpn_update::update::{self, CheckOutcome, CheckResult, UpdateStage, UpdateStatus};
-use gnosis_vpn_update::{logging, output};
 
 #[tokio::main]
 async fn main() {
-    logging::setup();
+    logging::setup(None);
     let cli = cli::parse();
     // Plain throughout: the app passes `--output json`. Either format goes to
     // stdout; stderr stays logs.

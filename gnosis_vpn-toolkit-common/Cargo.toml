@@ -1,0 +1,16 @@
+# Helpers every toolkit binary shares; a plain library, never shipped on its own.
+[package]
+edition = { workspace = true }
+license = { workspace = true }
+name    = "gnosis_vpn-toolkit-common"
+version = { workspace = true }
+
+[lib]
+doctest = false
+
+[dependencies]
+clap               = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
