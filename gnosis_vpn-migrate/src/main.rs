@@ -151,12 +151,42 @@ fn print_version(format: OutputFormat) {
     }
 }
 
-/// Two stderr lines the installer prints verbatim: the reason, then the log and the three ways forward.
+/// Two stderr lines the installer prints verbatim: the reason, then the log and the ways forward.
 fn print_paths_forward(outcome: &Outcome, log_file: &Path, user: Option<&str>) {
-    let user = user.unwrap_or("<user>");
     eprintln!("gnosis_vpn-migrate: {}", outcome.reason());
-    eprintln!(
-        "log: {} | next: sudo gnosis_vpn-migrate upload-log | sudo gnosis_vpn-migrate identity --user {user} [--replace] | sudo gnosis_vpn-migrate start-clean --user {user}",
-        log_file.display()
-    );
+    eprintln!("log: {} | next: {}", log_file.display(), next_steps(outcome, user));
+}
+
+fn next_steps(outcome: &Outcome, user: Option<&str>) -> String {
+    let user = user.unwrap_or("<user>");
+    // On a conflict `--user` would also move the current identity aside, and the next start would generate a third one.
+    if matches!(outcome, Outcome::Conflict { .. }) {
+        return format!(
+            "sudo gnosis_vpn-migrate identity --user {user} --replace (keep the legacy identity) | sudo gnosis_vpn-migrate start-clean (keep the current one)"
+        );
+    }
+    format!(
+        "sudo gnosis_vpn-migrate upload-log | sudo gnosis_vpn-migrate identity --user {user} [--replace] | sudo gnosis_vpn-migrate start-clean --user {user}"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_conflict_offers_the_start_clean_that_keeps_the_current_identity() {
+        let conflict = Outcome::Conflict {
+            network: "jura".into(),
+            user: "alice".into(),
+            mismatches: vec![],
+        };
+        let next = next_steps(&conflict, Some("alice"));
+        assert!(next.contains("identity --user alice --replace"), "{next}");
+        assert!(next.contains("start-clean (keep the current one)"), "{next}");
+        assert!(!next.contains("start-clean --user"), "{next}");
+
+        let failed = Outcome::from_failure(Failure::new(Stage::Destination, "x"));
+        assert!(next_steps(&failed, Some("alice")).contains("start-clean --user alice"));
+    }
 }
