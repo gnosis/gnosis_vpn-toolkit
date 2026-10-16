@@ -1,9 +1,10 @@
 //! The migration: enumerate, compare, copy into a staging dir, verify, rename into place. Nothing is ever deleted.
+//! Root writes into the user's home only through `nofollow`, so a symlink the user plants cannot redirect them.
 
 use std::fmt;
-use std::fs::{self, File, Permissions};
-use std::io;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, File};
+use std::io::{self, Seek, SeekFrom, Write};
+use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
 
 use exitcode::ExitCode;
@@ -11,6 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::layout::{self, UserLayout};
+use crate::nofollow;
 use crate::user::{self, Account};
 
 /// Where a run failed; each stage has one exit code, which is what the installer scripts key on.
@@ -258,8 +260,8 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
         });
     };
     let plan = legacy.plan()?;
-    let layout = layout::user_layout(&req.account.home);
-    let target = Target::new(&layout, req.network);
+    let layout = layout::user_layout();
+    let target = Target::new(&req.account.home, &layout, req.network);
     let files: Vec<Move> = plan
         .iter()
         .map(|p| Move {
@@ -293,20 +295,20 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
     }
 
     let ts = timestamp();
-    if target.exists() {
-        target.move_aside("replaced", &ts)?;
-    }
-    create_user_dirs(&layout, req.account)?;
-    let staging = Target::new(&layout, &format!("{}.migrating-{ts}", req.network));
-    if let Err(e) = stage_files(&plan, &staging, req.account) {
-        tracing::warn!(error = %e.error, "staging failed, removing the staging dirs");
-        staging.remove();
+    let networks = Networks::create(req.account, &layout)?;
+    let replaced = networks.move_aside(req.network, "replaced", &ts)?;
+    let staging = format!("{}.migrating-{ts}", req.network);
+    let marker = marker_content(&legacy, req.toolkit_version);
+    let installed = stage(&networks, &staging, &plan, &marker, req.account)
+        .and_then(|()| publish(&networks, &staging, req.network));
+    if let Err(e) = installed {
+        tracing::warn!(error = %e.error, "migration failed, removing the staging dirs and restoring replaced ones");
+        networks.remove(&staging);
+        networks.restore(&replaced);
         return Err(e);
     }
-    rename(&staging.data, &target.data)?;
-    rename(&staging.cache, &target.cache)?;
+    // Only once the new identity is durable may the legacy one disappear.
     let legacy_moves = legacy.move_aside(&ts)?;
-    write_marker(&target.data.join(layout::MIGRATED_FROM_FILE), &legacy, req)?;
     tracing::info!(%network, %user, "migration complete");
     Ok(Outcome::Migrated {
         network,
@@ -331,13 +333,28 @@ pub fn start_clean(legacy_home: &Path, user_dirs: Option<(&Account, &str)>) -> R
         });
     }
     if let Some((account, network)) = user_dirs {
-        let layout = layout::user_layout(&account.home);
-        moved.extend(Target::new(&layout, network).move_aside("reset", &ts)?);
+        moved.extend(move_user_dirs_aside(account, network, &ts)?);
     }
     if moved.is_empty() {
         return Ok(Outcome::NothingToDo);
     }
     Ok(Outcome::StartedClean { moved })
+}
+
+/// Only opens existing dirs: a reset must not create the per-user tree.
+fn move_user_dirs_aside(account: &Account, network: &str, ts: &str) -> Result<Vec<Move>, Failure> {
+    let layout = layout::user_layout();
+    let home = nofollow::open_home(&account.home).map_err(destination(&account.home))?;
+    let mut moved = Vec::new();
+    for base in [&layout.data, &layout.cache] {
+        let rel = base.join(layout::NETWORKS_DIR);
+        let path = account.home.join(&rel);
+        let Some(networks) = nofollow::find_dir(&home, &rel).map_err(destination(&path))? else {
+            continue;
+        };
+        moved.extend(move_aside_in(&networks, &path, network, "reset", ts)?);
+    }
+    Ok(moved)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -392,7 +409,9 @@ impl Legacy {
         self.sources
             .iter()
             .map(|(from, place, rel)| {
-                let sha256 = sha256(from).map_err(|e| Failure::new(Stage::Legacy, with_path(from, &e)))?;
+                let sha256 = File::open(from)
+                    .and_then(sha256)
+                    .map_err(|e| Failure::new(Stage::Legacy, with_path(from, &e)))?;
                 Ok(Planned {
                     from: from.clone(),
                     place: *place,
@@ -414,6 +433,11 @@ impl Legacy {
             let aside = unique_aside(redb.with_file_name(format!("{}.migrated-{ts}", layout::PIX_DB_FILE)));
             moved.push(rename_aside(redb, aside)?);
         }
+        if let Some(home) = self.config_dir.parent() {
+            File::open(home)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| Failure::new(Stage::Legacy, with_path(home, &e)))?;
+        }
         Ok(moved)
     }
 }
@@ -427,17 +451,17 @@ fn rename_aside(from: &Path, to: PathBuf) -> Result<Move, Failure> {
     })
 }
 
-/// The per-network dir pair; also used for the staging pair and for moving either aside.
+/// The per-network dir pair as absolute paths, for reporting and the read-only comparison.
 struct Target {
     data: PathBuf,
     cache: PathBuf,
 }
 
 impl Target {
-    fn new(layout: &UserLayout, name: &str) -> Self {
+    fn new(home: &Path, layout: &UserLayout, network: &str) -> Self {
         Self {
-            data: layout::network_dir(&layout.data, name),
-            cache: layout::network_dir(&layout.cache, name),
+            data: home.join(layout::network_dir(&layout.data, network)),
+            cache: home.join(layout::network_dir(&layout.cache, network)),
         }
     }
 
@@ -452,11 +476,13 @@ impl Target {
         }
     }
 
+    /// A symlink in place of a target file counts as missing, so root never hashes a file the user points at.
     fn compare(&self, plan: &[Planned]) -> Result<Vec<Mismatch>, Failure> {
         let mut mismatches = Vec::new();
         for planned in plan {
             let target = self.path(planned);
-            if !target.is_file() {
+            let is_file = fs::symlink_metadata(&target).is_ok_and(|m| m.is_file());
+            if !is_file {
                 mismatches.push(Mismatch {
                     legacy: planned.from.clone(),
                     target,
@@ -464,7 +490,9 @@ impl Target {
                 });
                 continue;
             }
-            let hash = sha256(&target).map_err(|e| Failure::new(Stage::Destination, with_path(&target, &e)))?;
+            let hash = nofollow::open_file(&target)
+                .and_then(sha256)
+                .map_err(|e| Failure::new(Stage::Destination, with_path(&target, &e)))?;
             if hash != planned.sha256 {
                 mismatches.push(Mismatch {
                     legacy: planned.from.clone(),
@@ -475,67 +503,142 @@ impl Target {
         }
         Ok(mismatches)
     }
+}
 
-    /// Renames whichever of the pair exists to a `<name>.<reason>-<ts>` sibling.
-    fn move_aside(&self, reason: &str, ts: &str) -> Result<Vec<Move>, Failure> {
+/// The data and cache `networks/` dirs, held open so no later step resolves the user-controlled path again.
+struct Networks {
+    data: OwnedFd,
+    cache: OwnedFd,
+    data_path: PathBuf,
+    cache_path: PathBuf,
+}
+
+impl Networks {
+    fn create(account: &Account, layout: &UserLayout) -> Result<Self, Failure> {
+        let home = nofollow::open_home(&account.home).map_err(destination(&account.home))?;
+        for (parent, mode) in &layout.parents {
+            nofollow::ensure_dir(&home, parent, *mode, account).map_err(destination(&account.home.join(parent)))?;
+        }
+        let data_rel = layout.data.join(layout::NETWORKS_DIR);
+        let cache_rel = layout.cache.join(layout::NETWORKS_DIR);
+        let data_path = account.home.join(&data_rel);
+        let cache_path = account.home.join(&cache_rel);
+        let data =
+            nofollow::ensure_dir(&home, &data_rel, layout::DIR_MODE, account).map_err(destination(&data_path))?;
+        let cache =
+            nofollow::ensure_dir(&home, &cache_rel, layout::DIR_MODE, account).map_err(destination(&cache_path))?;
+        Ok(Self {
+            data,
+            cache,
+            data_path,
+            cache_path,
+        })
+    }
+
+    fn side(&self, place: Place) -> (&OwnedFd, &Path) {
+        match place {
+            Place::Data => (&self.data, &self.data_path),
+            Place::Cache => (&self.cache, &self.cache_path),
+        }
+    }
+
+    fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<Move>, Failure> {
         let mut moved = Vec::new();
-        for dir in [&self.data, &self.cache] {
-            if !dir.exists() {
-                continue;
-            }
-            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("network");
-            let aside = unique_aside(dir.with_file_name(format!("{name}.{reason}-{ts}")));
-            fs::rename(dir, &aside).map_err(|e| Failure::new(Stage::Destination, with_path(dir, &e)))?;
-            tracing::info!(from = %dir.display(), to = %aside.display(), "per-user network dir moved aside");
-            moved.push(Move {
-                from: dir.clone(),
-                to: aside,
-            });
+        for place in [Place::Data, Place::Cache] {
+            let (dir, path) = self.side(place);
+            moved.extend(move_aside_in(dir, path, network, reason, ts)?);
         }
         Ok(moved)
     }
 
-    fn remove(&self) {
-        let _ = fs::remove_dir_all(&self.data);
-        let _ = fs::remove_dir_all(&self.cache);
+    /// Best effort: the run is already failing, so a failed undo is only logged.
+    fn restore(&self, moved: &[Move]) {
+        for m in moved {
+            let place = if m.from.starts_with(&self.data_path) {
+                Place::Data
+            } else {
+                Place::Cache
+            };
+            let (dir, _) = self.side(place);
+            let (Some(original), Some(aside)) = (m.from.file_name(), m.to.file_name()) else {
+                continue;
+            };
+            match nofollow::rename(dir, aside, original) {
+                Ok(()) => tracing::info!(from = %m.to.display(), to = %m.from.display(), "replaced dir restored"),
+                Err(e) => tracing::error!(path = %m.to.display(), error = %e, "cannot restore the replaced dir"),
+            }
+        }
+    }
+
+    fn remove(&self, staging: &str) {
+        for place in [Place::Data, Place::Cache] {
+            let (dir, path) = self.side(place);
+            match nofollow::remove_tree(dir, staging) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => tracing::warn!(path = %path.join(staging).display(), error = %e, "cannot remove staging dir"),
+            }
+        }
     }
 }
 
-fn create_user_dirs(layout: &UserLayout, account: &Account) -> Result<(), Failure> {
-    for (dir, mode) in &layout.parents {
-        ensure_dir(dir, *mode, account)?;
+fn move_aside_in(
+    networks: &OwnedFd,
+    networks_path: &Path,
+    network: &str,
+    reason: &str,
+    ts: &str,
+) -> Result<Option<Move>, Failure> {
+    let from = networks_path.join(network);
+    let dest = destination(&from);
+    if !nofollow::exists(networks, network).map_err(&dest)? {
+        return Ok(None);
     }
-    for base in [&layout.data, &layout.cache] {
-        ensure_dir(base, layout::DIR_MODE, account)?;
-        ensure_dir(&base.join("networks"), layout::DIR_MODE, account)?;
+    let aside = unique_name(networks, format!("{network}.{reason}-{ts}")).map_err(&dest)?;
+    nofollow::rename(networks, network, &aside).map_err(&dest)?;
+    let to = networks_path.join(&aside);
+    tracing::info!(from = %from.display(), to = %to.display(), "per-user network dir moved aside");
+    Ok(Some(Move { from: from.clone(), to }))
+}
+
+/// Both staging dirs stay root-owned until filled, so the user cannot plant entries in them; data first, then cache.
+fn stage(networks: &Networks, name: &str, plan: &[Planned], marker: &str, account: &Account) -> Result<(), Failure> {
+    for place in [Place::Data, Place::Cache] {
+        let (parent, parent_path) = networks.side(place);
+        let path = parent_path.join(name);
+        let dest = destination(&path);
+        let dir = nofollow::create_dir(parent, name, layout::DIR_MODE).map_err(&dest)?;
+        for planned in plan.iter().filter(|p| p.place == place) {
+            copy_verified(planned, &dir, &path, account)?;
+        }
+        if place == Place::Data {
+            write_marker(&dir, &path, marker, account)?;
+        }
+        user::chown(&dir, account).map_err(&dest)?;
+        nofollow::sync(&dir).map_err(&dest)?;
     }
     Ok(())
 }
 
-/// Data files first, then cache, so an injected cache failure still exercises the data cleanup.
-fn stage_files(plan: &[Planned], staging: &Target, account: &Account) -> Result<(), Failure> {
-    ensure_dir(&staging.data, layout::DIR_MODE, account)?;
-    for planned in plan.iter().filter(|p| p.place == Place::Data) {
-        copy_verified(planned, &staging.path(planned), account)?;
-    }
-    ensure_dir(&staging.cache, layout::DIR_MODE, account)?;
-    for planned in plan.iter().filter(|p| p.place == Place::Cache) {
-        copy_verified(planned, &staging.path(planned), account)?;
-    }
-    Ok(())
-}
-
-/// Plain copy (rename cannot cross from /var/lib to /home), fsync, own, 0600, then hash against the source.
-fn copy_verified(planned: &Planned, to: &Path, account: &Account) -> Result<(), Failure> {
-    let dest = |e: io::Error| Failure::new(Stage::Destination, with_path(to, &e));
-    if let Some(parent) = to.parent() {
-        ensure_dir(parent, layout::DIR_MODE, account)?;
-    }
-    fs::copy(&planned.from, to).map_err(dest)?;
-    File::open(to).and_then(|f| f.sync_all()).map_err(dest)?;
-    fs::set_permissions(to, Permissions::from_mode(layout::FILE_MODE)).map_err(dest)?;
-    user::chown(to, account).map_err(dest)?;
-    let copied = sha256(to).map_err(dest)?;
+/// Plain copy (rename cannot cross from /var/lib to /home), own, fsync, then hash the written bytes against the source.
+fn copy_verified(planned: &Planned, staging: &OwnedFd, staging_path: &Path, account: &Account) -> Result<(), Failure> {
+    let to = staging_path.join(&planned.rel);
+    let dest = destination(&to);
+    let subdir = planned.rel.parent().filter(|p| !p.as_os_str().is_empty());
+    let dir = match subdir {
+        Some(subdir) => nofollow::ensure_dir(staging, subdir, layout::DIR_MODE, account).map_err(&dest)?,
+        None => staging.try_clone().map_err(&dest)?,
+    };
+    let file_name = planned.rel.file_name().unwrap_or_default();
+    let mut source =
+        File::open(&planned.from).map_err(|e| Failure::new(Stage::Legacy, with_path(&planned.from, &e)))?;
+    let mut copy = nofollow::create_file(&dir, file_name, layout::FILE_MODE).map_err(&dest)?;
+    io::copy(&mut source, &mut copy).map_err(&dest)?;
+    user::chown(&copy, account).map_err(&dest)?;
+    copy.sync_all().map_err(&dest)?;
+    nofollow::sync(&dir).map_err(&dest)?;
+    copy.seek(SeekFrom::Start(0)).map_err(&dest)?;
+    let copied = sha256(&mut copy).map_err(&dest)?;
     if copied != planned.sha256 {
         return Err(Failure::new(
             Stage::Destination,
@@ -546,45 +649,53 @@ fn copy_verified(planned: &Planned, to: &Path, account: &Account) -> Result<(), 
     Ok(())
 }
 
-fn ensure_dir(path: &Path, mode: u32, account: &Account) -> Result<(), Failure> {
-    if path.is_dir() {
-        return Ok(());
-    }
-    let dest = |e: io::Error| Failure::new(Stage::Destination, with_path(path, &e));
-    fs::create_dir(path).map_err(dest)?;
-    fs::set_permissions(path, Permissions::from_mode(mode)).map_err(dest)?;
-    user::chown(path, account).map_err(dest)?;
-    tracing::info!(path = %path.display(), mode = format_args!("{mode:o}"), "directory created");
-    Ok(())
-}
-
-fn rename(from: &Path, to: &Path) -> Result<(), Failure> {
-    fs::rename(from, to).map_err(|e| {
-        Failure::new(
-            Stage::Destination,
-            format!("{} -> {}: {e}", from.display(), to.display()),
-        )
-    })?;
-    tracing::info!(from = %from.display(), to = %to.display(), "renamed into place");
-    Ok(())
-}
-
-fn write_marker(path: &Path, legacy: &Legacy, req: &IdentityRequest<'_>) -> Result<(), Failure> {
-    let dest = |e: io::Error| Failure::new(Stage::Destination, with_path(path, &e));
-    let content = format!(
-        "source = {}\nmigrated_at = {}\ntoolkit_version = {}\n",
+fn marker_content(legacy: &Legacy, toolkit_version: &str) -> String {
+    format!(
+        "source = {}\nmigrated_at = {}\ntoolkit_version = {toolkit_version}\n",
         legacy.config_dir.display(),
         chrono::Utc::now().to_rfc3339(),
-        req.toolkit_version
-    );
-    fs::write(path, content).map_err(dest)?;
-    fs::set_permissions(path, Permissions::from_mode(layout::FILE_MODE)).map_err(dest)?;
-    user::chown(path, req.account).map_err(dest)
+    )
 }
 
-fn sha256(path: &Path) -> io::Result<[u8; 32]> {
+fn write_marker(staging: &OwnedFd, staging_path: &Path, content: &str, account: &Account) -> Result<(), Failure> {
+    let path = staging_path.join(layout::MIGRATED_FROM_FILE);
+    let dest = destination(&path);
+    let mut marker = nofollow::create_file(staging, layout::MIGRATED_FROM_FILE, layout::FILE_MODE).map_err(&dest)?;
+    marker.write_all(content.as_bytes()).map_err(&dest)?;
+    user::chown(&marker, account).map_err(&dest)?;
+    marker.sync_all().map_err(&dest)
+}
+
+/// Data first; a failed cache rename takes the data back, so a retry starts from the same state.
+fn publish(networks: &Networks, staging: &str, network: &str) -> Result<(), Failure> {
+    let rename_failed = |path: &Path, e: io::Error| {
+        Failure::new(
+            Stage::Destination,
+            format!("{} -> {network}: {e}", path.join(staging).display()),
+        )
+    };
+    nofollow::rename(&networks.data, staging, network).map_err(|e| rename_failed(&networks.data_path, e))?;
+    if let Err(e) = nofollow::rename(&networks.cache, staging, network) {
+        if let Err(undo) = nofollow::rename(&networks.data, network, staging) {
+            tracing::error!(error = %undo, "cannot take the published data dir back");
+        }
+        return Err(rename_failed(&networks.cache_path, e));
+    }
+    for place in [Place::Data, Place::Cache] {
+        let (dir, path) = networks.side(place);
+        nofollow::sync(dir).map_err(destination(path))?;
+    }
+    tracing::info!(network, "renamed into place");
+    Ok(())
+}
+
+fn destination(path: &Path) -> impl Fn(io::Error) -> Failure + '_ {
+    move |e| Failure::new(Stage::Destination, with_path(path, &e))
+}
+
+fn sha256(mut reader: impl io::Read) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
-    io::copy(&mut File::open(path)?, &mut hasher)?;
+    io::copy(&mut reader, &mut hasher)?;
     Ok(hasher.finalize().into())
 }
 
@@ -608,10 +719,26 @@ fn unique_aside(candidate: PathBuf) -> PathBuf {
         .unwrap_or(candidate)
 }
 
+/// `unique_aside` for an entry of a held dir.
+fn unique_name(dir: &OwnedFd, candidate: String) -> io::Result<String> {
+    if !nofollow::exists(dir, &candidate)? {
+        return Ok(candidate);
+    }
+    let mut n = 1;
+    loop {
+        let name = format!("{candidate}.{n}");
+        if !nofollow::exists(dir, &name)? {
+            return Ok(name);
+        }
+        n += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::MetadataExt;
+    use rustix::fs::Mode;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     const NETWORK: &str = "jura";
 
@@ -629,11 +756,6 @@ mod tests {
     fn fixture_in(legacy: PathBuf, home: PathBuf, tmp: tempfile::TempDir) -> Fixture {
         fs::create_dir_all(&legacy).unwrap();
         fs::create_dir_all(&home).unwrap();
-        // macOS has no XDG parents to create; the fixture plays the account's existing ~/Library.
-        if cfg!(target_os = "macos") {
-            fs::create_dir_all(home.join("Library/Application Support")).unwrap();
-            fs::create_dir_all(home.join("Library/Caches")).unwrap();
-        }
         let account = Account {
             name: "tester".to_string(),
             uid: uzers::get_effective_uid(),
@@ -661,12 +783,19 @@ mod tests {
             self
         }
 
+        /// The layout with absolute paths, which is what the assertions look at.
         fn layout(&self) -> UserLayout {
-            layout::user_layout(&self.account.home)
+            let rel = layout::user_layout();
+            let home = &self.account.home;
+            UserLayout {
+                data: home.join(rel.data),
+                cache: home.join(rel.cache),
+                parents: rel.parents.into_iter().map(|(p, m)| (home.join(p), m)).collect(),
+            }
         }
 
         fn target(&self) -> Target {
-            Target::new(&self.layout(), NETWORK)
+            Target::new(&self.account.home, &layout::user_layout(), NETWORK)
         }
 
         fn run(&self, dry_run: bool, replace: bool) -> Result<Outcome, Failure> {
@@ -681,8 +810,9 @@ mod tests {
         }
     }
 
-    fn mode(path: &Path) -> u32 {
-        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    fn mode(path: &Path) -> Mode {
+        let stat = rustix::fs::stat(path).unwrap();
+        Mode::from_raw_mode(stat.st_mode) & Mode::from_bits_truncate(0o777)
     }
 
     fn entries(dir: &Path) -> Vec<String> {
@@ -724,7 +854,7 @@ mod tests {
             fx.run(false, false).unwrap(),
             Outcome::NothingToMigrate { .. }
         ));
-        assert!(entries(&fx.account.home).is_empty() || cfg!(target_os = "macos"));
+        assert!(entries(&fx.account.home).is_empty());
     }
 
     #[test]
@@ -750,6 +880,10 @@ mod tests {
             assert_eq!(mode(&path), layout::FILE_MODE, "{}", path.display());
             assert_eq!(fs::metadata(&path).unwrap().uid(), fx.account.uid);
         };
+        let expect_dir = |dir: PathBuf| {
+            assert_eq!(mode(&dir), layout::DIR_MODE, "{}", dir.display());
+            assert_eq!(fs::metadata(&dir).unwrap().uid(), fx.account.uid);
+        };
         expect(target.data.join(layout::IDENTITY_FILE), "legacy id bytes");
         expect(target.data.join(layout::PASSWORD_FILE), "legacy pass bytes");
         expect(target.cache.join(layout::SAFE_FILE), "legacy safe bytes");
@@ -757,9 +891,9 @@ mod tests {
             target.data.join(layout::PIX_DIR).join(layout::PIX_DB_FILE),
             "legacy redb bytes",
         );
-        for dir in [&target.data, &target.cache, &target.data.join(layout::PIX_DIR)] {
-            assert_eq!(mode(dir), layout::DIR_MODE, "{}", dir.display());
-        }
+        expect_dir(target.data.clone());
+        expect_dir(target.cache.clone());
+        expect_dir(target.data.join(layout::PIX_DIR));
         let marker = fs::read_to_string(target.data.join(layout::MIGRATED_FROM_FILE)).unwrap();
         assert!(marker.contains(&format!("source = {}", fx.legacy.join(".config").display())));
         assert!(marker.contains("toolkit_version = 0.5.0-test"));
@@ -781,24 +915,88 @@ mod tests {
             "legacy id bytes"
         );
         assert!(legacy[1].to.to_str().unwrap().contains("curvy-pix.redb.migrated-"));
-        let staging_left = entries(&fx.layout().data.join("networks"))
+        let staging_left = entries(&fx.layout().data.join(layout::NETWORKS_DIR))
             .into_iter()
             .any(|n| n.contains("migrating"));
         assert!(!staging_left);
     }
 
     #[test]
-    fn a_failure_mid_copy_leaves_no_destination_or_staging_behind() {
+    fn a_failure_after_staging_removes_staging_and_restores_the_replaced_identity() {
+        // Root ignores the read-only dir this test relies on.
+        if user::is_root() {
+            return;
+        }
         let fx = fixture();
         fx.with_legacy(&["id", "pass", "safe"]);
+        let target = fx.target();
+        fs::create_dir_all(&target.data).unwrap();
+        fs::write(target.data.join(layout::IDENTITY_FILE), "fresh id").unwrap();
         let layout = fx.layout();
-        fs::create_dir_all(&layout.cache).unwrap();
-        // A file where the cache `networks/` dir must go fails after the data files were already staged.
-        fs::write(layout.cache.join("networks"), "blocker").unwrap();
+        let cache_networks = layout.cache.join(layout::NETWORKS_DIR);
+        fs::create_dir_all(&cache_networks).unwrap();
+        // The data staging is filled before the cache staging dir is created, and that creation fails.
+        fs::set_permissions(&cache_networks, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = fx.run(false, true);
+        fs::set_permissions(&cache_networks, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.unwrap_err().stage, Stage::Destination);
+        assert_eq!(
+            entries(&layout.data.join(layout::NETWORKS_DIR)),
+            vec![NETWORK.to_string()]
+        );
+        assert_eq!(
+            fs::read_to_string(target.data.join(layout::IDENTITY_FILE)).unwrap(),
+            "fresh id"
+        );
+        assert!(entries(&cache_networks).is_empty());
+        assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
+    }
+
+    #[test]
+    fn a_failed_cache_publish_takes_the_data_dir_back() {
+        let fx = fixture();
+        fx.with_legacy(&["id", "safe"]);
+        let legacy = Legacy::find(&fx.legacy).unwrap();
+        let plan = legacy.plan().unwrap();
+        let networks = Networks::create(&fx.account, &layout::user_layout()).unwrap();
+        stage(&networks, "staging", &plan, "marker", &fx.account).unwrap();
+        // A non-empty dir cannot be renamed over.
+        let blocker = fx.target().cache.join("occupied");
+        fs::create_dir_all(&blocker).unwrap();
+
+        let err = publish(&networks, "staging", NETWORK).unwrap_err();
+        assert_eq!(err.stage, Stage::Destination);
+        let layout = fx.layout();
+        assert_eq!(
+            entries(&layout.data.join(layout::NETWORKS_DIR)),
+            vec!["staging".to_string()]
+        );
+        networks.remove("staging");
+        assert!(entries(&layout.data.join(layout::NETWORKS_DIR)).is_empty());
+        assert_eq!(
+            entries(&layout.cache.join(layout::NETWORKS_DIR)),
+            vec![NETWORK.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_planted_symlink_in_the_destination_is_never_written_through() {
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let victim = fx._tmp.path().join("victim");
+        fs::write(&victim, "root-owned bytes").unwrap();
+        let networks = fx.layout().data.join(layout::NETWORKS_DIR);
+        fs::create_dir_all(&networks).unwrap();
+        // The staging name is predictable to the second, so plant it for the next few seconds.
+        let now = chrono::Utc::now();
+        for offset in 0..5 {
+            let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+            std::os::unix::fs::symlink(&victim, networks.join(format!("{NETWORK}.migrating-{ts}"))).unwrap();
+        }
         let err = fx.run(false, false).unwrap_err();
         assert_eq!(err.stage, Stage::Destination);
-        assert!(!fx.target().data.exists());
-        assert!(entries(&layout.data.join("networks")).is_empty());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "root-owned bytes");
         assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
     }
 
@@ -860,17 +1058,21 @@ mod tests {
         );
         let layout = fx.layout();
         for base in [&layout.data, &layout.cache] {
-            let replaced: Vec<String> = entries(&base.join("networks"))
+            let replaced: Vec<String> = entries(&base.join(layout::NETWORKS_DIR))
                 .into_iter()
                 .filter(|n| n.starts_with("jura.replaced-"))
                 .collect();
             assert_eq!(replaced.len(), 1, "{}", base.display());
         }
-        let replaced = entries(&layout.data.join("networks"))
+        let replaced = entries(&layout.data.join(layout::NETWORKS_DIR))
             .into_iter()
             .find(|n| n.starts_with("jura.replaced-"))
             .unwrap();
-        let old_id = layout.data.join("networks").join(replaced).join(layout::IDENTITY_FILE);
+        let old_id = layout
+            .data
+            .join(layout::NETWORKS_DIR)
+            .join(replaced)
+            .join(layout::IDENTITY_FILE);
         assert_eq!(fs::read_to_string(old_id).unwrap(), "fresh id");
     }
 
@@ -907,7 +1109,7 @@ mod tests {
         assert!(!target.data.exists() && !target.cache.exists());
         let layout = fx.layout();
         for base in [&layout.data, &layout.cache] {
-            let reset = entries(&base.join("networks"));
+            let reset = entries(&base.join(layout::NETWORKS_DIR));
             assert_eq!(reset.len(), 1);
             assert!(reset[0].starts_with("jura.reset-"), "{}", reset[0]);
         }
@@ -930,24 +1132,56 @@ mod tests {
         assert!(target.data.exists());
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
-    fn xdg_parents_of_a_bare_home_get_the_shell_modes_and_the_owner() {
+    fn parents_of_a_bare_home_get_their_modes_and_the_owner() {
         let fx = fixture();
         fx.with_legacy(&["id", "pass"]);
         fx.run(false, false).unwrap();
-        let home = &fx.account.home;
-        for (dir, expected) in [
-            (home.join(".local"), 0o755),
-            (home.join(".local/share"), 0o755),
-            (home.join(".cache"), 0o755),
-            (home.join(".local/share/gnosisvpn"), 0o700),
-            (home.join(".local/share/gnosisvpn/networks"), 0o700),
-            (home.join(".cache/gnosisvpn"), 0o700),
-            (home.join(".cache/gnosisvpn/networks"), 0o700),
-        ] {
-            assert_eq!(mode(&dir), expected, "{}", dir.display());
-            assert_eq!(fs::metadata(&dir).unwrap().uid(), fx.account.uid);
+        let layout = fx.layout();
+        let own_dirs = [
+            &layout.data,
+            &layout.data.join(layout::NETWORKS_DIR),
+            &layout.cache,
+            &layout.cache.join(layout::NETWORKS_DIR),
+        ];
+        let expected = layout
+            .parents
+            .iter()
+            .map(|(dir, m)| (dir, *m))
+            .chain(own_dirs.into_iter().map(|dir| (dir, layout::DIR_MODE)));
+        for (dir, m) in expected {
+            assert_eq!(mode(dir), m, "{}", dir.display());
+            assert_eq!(fs::metadata(dir).unwrap().uid(), fx.account.uid);
+        }
+    }
+
+    /// Only `just test-root` reaches this: chown to a foreign uid needs root.
+    #[test]
+    fn as_root_everything_created_belongs_to_the_account() {
+        if !user::is_root() {
+            return;
+        }
+        let nobody = uzers::get_user_by_name("nobody").expect("a nobody account");
+        let mut fx = fixture();
+        fx.account.uid = nobody.uid();
+        fx.account.gid = nobody.primary_group_id();
+        fx.with_legacy(&["id", "pass", "safe", "redb"]);
+        fx.run(false, false).unwrap();
+        let layout = fx.layout();
+        let mut created: Vec<PathBuf> = layout.parents.iter().map(|(dir, _)| dir.clone()).collect();
+        for base in [&layout.data, &layout.cache] {
+            created.extend(tree(base).into_iter().map(|rel| base.join(rel)));
+            created.push(base.clone());
+        }
+        assert!(created.iter().any(|p| p.ends_with(layout::MIGRATED_FROM_FILE)));
+        for path in created {
+            let meta = fs::symlink_metadata(&path).unwrap();
+            assert_eq!(
+                (meta.uid(), meta.gid()),
+                (fx.account.uid, fx.account.gid),
+                "{}",
+                path.display()
+            );
         }
     }
 

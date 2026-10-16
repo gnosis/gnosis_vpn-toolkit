@@ -2,14 +2,18 @@
 
 use std::path::{Path, PathBuf};
 
+use rustix::fs::Mode;
+
 pub const IDENTITY_FILE: &str = "hopr.id";
 pub const PASSWORD_FILE: &str = "hopr.pass";
 pub const SAFE_FILE: &str = "hopr.safe";
 pub const PIX_DIR: &str = "pix";
 pub const PIX_DB_FILE: &str = "curvy-pix.redb";
 pub const MIGRATED_FROM_FILE: &str = "migrated-from";
-pub const DIR_MODE: u32 = 0o700;
-pub const FILE_MODE: u32 = 0o600;
+pub const DIR_MODE: Mode = Mode::from_bits_truncate(0o700);
+pub const FILE_MODE: Mode = Mode::from_bits_truncate(0o600);
+// Shared parents (XDG, ~/Library subdirs) get the mode the OS itself would give them.
+const SHARED_DIR_MODE: Mode = Mode::from_bits_truncate(0o755);
 
 pub const LEGACY_CONFIG_DIR: &str = ".config";
 pub const LEGACY_IDENTITY_FILE: &str = "gnosisvpn-hopr.id";
@@ -69,36 +73,42 @@ pub fn log_sources() -> LogSources {
     }
 }
 
-/// The per-user roots plus the parents a bare account may lack, with the mode each gets when created.
+/// The per-user roots plus the parents a bare account may lack, all relative to the home dir, with the mode each gets when created.
 pub struct UserLayout {
     pub data: PathBuf,
     pub cache: PathBuf,
-    pub parents: Vec<(PathBuf, u32)>,
+    pub parents: Vec<(PathBuf, Mode)>,
 }
 
 #[cfg(target_os = "macos")]
-pub fn user_layout(home: &Path) -> UserLayout {
+pub fn user_layout() -> UserLayout {
+    // An account that never logged in may lack ~/Library or its subdirs.
     UserLayout {
-        data: home.join("Library/Application Support/GnosisVPN"),
-        cache: home.join("Library/Caches/GnosisVPN"),
-        parents: Vec::new(),
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn user_layout(home: &Path) -> UserLayout {
-    // XDG parents are shared with every other program, so they get the shell's usual 0755.
-    UserLayout {
-        data: home.join(".local/share/gnosisvpn"),
-        cache: home.join(".cache/gnosisvpn"),
+        data: PathBuf::from("Library/Application Support/GnosisVPN"),
+        cache: PathBuf::from("Library/Caches/GnosisVPN"),
         parents: vec![
-            (home.join(".local"), 0o755),
-            (home.join(".local/share"), 0o755),
-            (home.join(".cache"), 0o755),
+            (PathBuf::from("Library"), DIR_MODE),
+            (PathBuf::from("Library/Application Support"), SHARED_DIR_MODE),
+            (PathBuf::from("Library/Caches"), SHARED_DIR_MODE),
         ],
     }
 }
 
+#[cfg(not(target_os = "macos"))]
+pub fn user_layout() -> UserLayout {
+    UserLayout {
+        data: PathBuf::from(".local/share/gnosisvpn"),
+        cache: PathBuf::from(".cache/gnosisvpn"),
+        parents: vec![
+            (PathBuf::from(".local"), SHARED_DIR_MODE),
+            (PathBuf::from(".local/share"), SHARED_DIR_MODE),
+            (PathBuf::from(".cache"), SHARED_DIR_MODE),
+        ],
+    }
+}
+
+pub const NETWORKS_DIR: &str = "networks";
+
 pub fn network_dir(base: &Path, network: &str) -> PathBuf {
-    base.join("networks").join(network)
+    base.join(NETWORKS_DIR).join(network)
 }

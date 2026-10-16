@@ -1,8 +1,10 @@
 //! The installing user: passwd lookup and ownership of what the migration creates.
 
 use std::io;
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
+use rustix::fs::{Gid, Uid};
 use uzers::os::unix::UserExt;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,7 +16,7 @@ pub struct Account {
 }
 
 pub fn is_root() -> bool {
-    uzers::get_effective_uid() == 0
+    rustix::process::geteuid().is_root()
 }
 
 /// Refuses root (the client never runs a worker as uid 0) and a home that is missing or is the legacy dir itself.
@@ -51,12 +53,12 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Skipped when the file already belongs to the target uid, which is what an unprivileged test run sees.
-pub fn chown(path: &Path, account: &Account) -> io::Result<()> {
-    if account.uid == uzers::get_effective_uid() {
-        return Ok(());
-    }
-    std::os::unix::fs::chown(path, Some(account.uid), Some(account.gid))
+/// Through the open handle, so a symlink swapped in after opening cannot redirect it.
+pub fn chown(fd: impl AsFd, account: &Account) -> io::Result<()> {
+    let owner = Some(Uid::from_raw(account.uid));
+    let group = Some(Gid::from_raw(account.gid));
+    rustix::fs::fchown(fd, owner, group)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -77,6 +79,10 @@ mod tests {
 
     #[test]
     fn the_current_user_resolves_to_its_passwd_entry() {
+        // Under `just test-root` the current user is root, which resolve refuses by design.
+        if is_root() {
+            return;
+        }
         let me = uzers::get_user_by_uid(uzers::get_effective_uid()).unwrap();
         let name = me.name().to_str().unwrap();
         let account = resolve(name, Path::new("/var/lib/gnosisvpn")).unwrap();
@@ -87,6 +93,9 @@ mod tests {
 
     #[test]
     fn a_home_equal_to_the_legacy_dir_is_refused() {
+        if is_root() {
+            return;
+        }
         let me = uzers::get_user_by_uid(uzers::get_effective_uid()).unwrap();
         let name = me.name().to_str().unwrap();
         let err = resolve(name, me.home_dir()).unwrap_err();
