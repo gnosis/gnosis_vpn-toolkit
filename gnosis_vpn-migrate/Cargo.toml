@@ -1,4 +1,4 @@
-# gnosis_vpn-migrate — the installer's identity migration; lib + thin bin like the updater, no libc, no unsafe.
+# gnosis_vpn-migrate — the installer's identity migration; lib + thin bin like the updater, no unsafe.
 [package]
 edition = { workspace = true }
 license = { workspace = true }
@@ -14,6 +14,7 @@ clap                      = { workspace = true }
 exitcode                  = { workspace = true }
 gnosis_vpn-toolkit-common = { path = "../gnosis_vpn-toolkit-common" }
 reqwest                   = { workspace = true, features = ["multipart"] }
+rustix                    = { workspace = true }
 serde                     = { workspace = true }
 serde_json                = { workspace = true }
 sha2                      = { workspace = true }
