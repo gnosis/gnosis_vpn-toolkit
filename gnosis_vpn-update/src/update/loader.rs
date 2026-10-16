@@ -76,7 +76,7 @@ pub async fn show() -> Loader {
     // The loader is launched via `su -l <console user>`; without root that
     // cannot work (and the status dir under /Library/Logs may not be
     // writable either).
-    if unsafe { libc::geteuid() } != 0 {
+    if !rustix::process::geteuid().is_root() {
         tracing::debug!("not running as root; skipping loader window");
         return loader;
     }
