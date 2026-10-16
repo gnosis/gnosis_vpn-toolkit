@@ -733,29 +733,9 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
 /// Best-effort free-space probe using `statvfs(3)` on Unix. Returns `None` if
 /// the call fails — callers should treat that as "skip the check" rather than
 /// blocking the install.
-// statvfs field widths differ per platform (on macOS `f_bavail` is u32 and
-// `f_frsize` u64, elsewhere both may already be u64), so one of the two casts
-// below is always "unnecessary" for the current target — keep both for
-// portability and overflow-free multiplication.
-#[allow(clippy::unnecessary_cast)]
 fn free_bytes(path: &std::path::Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::statvfs(c.as_ptr(), &mut buf) };
-        if rc != 0 {
-            return None;
-        }
-        Some(buf.f_bavail as u64 * buf.f_frsize as u64)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
+    let stats = rustix::fs::statvfs(path).ok()?;
+    Some(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
 /// Persisted so a crash mid-install can be recorded. Written on every terminal

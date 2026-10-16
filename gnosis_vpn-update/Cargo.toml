@@ -19,6 +19,7 @@ exitcode                  = { workspace = true }
 gnosis_vpn-toolkit-common = { path = "../gnosis_vpn-toolkit-common" }
 libc                      = { workspace = true }
 reqwest                   = { workspace = true }
+rustix                    = { workspace = true }
 serde                     = { workspace = true }
 serde_json                = { workspace = true }
 serde_with                = { workspace = true }
