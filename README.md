@@ -233,10 +233,12 @@ worker as uid 0.
   `/Library/Logs/GnosisVPN/installer/migrate.log` (macOS) when that file can be
   opened; otherwise stderr-only with one warning (`version` and the not-root
   path never need the file). On every non-OK exit two extra stderr lines name
-  the reason, the log file and the three ways forward:
+  the reason, the log file and the ways forward:
   `gnosis_vpn-migrate upload-log`,
   `gnosis_vpn-migrate identity --user <user> [--replace]`,
-  `gnosis_vpn-migrate start-clean --user <user>`.
+  `gnosis_vpn-migrate start-clean --user <user>`. A `Conflict` instead names
+  `identity --user <user> --replace` and a plain `start-clean`, which keeps
+  the current identity.
 - **exit codes** are the installer's contract (its scripts are bash without
   `jq`), so they carry the meaning on their own. This table is
   `gnosis_vpn-migrate`'s own — note `NOPERM` means "not root" here, unlike the
