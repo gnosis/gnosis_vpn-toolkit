@@ -533,7 +533,7 @@ async fn drive_engine(
     // binary) — which is why `install_result` is not `?`-ed until after it.
     #[cfg(target_os = "macos")]
     let updater_version = self_update::finish(aside, install_result.is_ok()).await;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     let updater_version = None;
 
     install_result.map_err(|e| (UpdateStage::Install, e))?;
@@ -919,9 +919,8 @@ pub(crate) mod install_platform {
     }
 }
 
-/// Stand-in for platforms with no install engine: unreachable (the CLI refuses
-/// first), but `drive_engine` calls `install` unconditionally.
-#[cfg(not(target_os = "macos"))]
+/// Unreachable on Linux (the CLI refuses first), but `drive_engine` calls `install` unconditionally.
+#[cfg(target_os = "linux")]
 pub(crate) mod install_platform {
     use std::path::Path;
 
