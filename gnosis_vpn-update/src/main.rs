@@ -113,9 +113,8 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
     exit_for_check(&result)
 }
 
-/// No install engine off macOS: refuse before touching the version file, the
-/// socket or the network, pointing at the apt commands instead.
-#[cfg(not(target_os = "macos"))]
+/// Linux has no install engine: refuse before touching the version file, the socket or the network, and point at apt.
+#[cfg(target_os = "linux")]
 async fn run_update(format: OutputFormat, _args: cli::UpdateArgs) -> ExitCode {
     let status = UpdateStatus::Failed {
         stage: UpdateStage::Install,
