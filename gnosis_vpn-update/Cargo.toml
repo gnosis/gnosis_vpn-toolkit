@@ -1,10 +1,5 @@
-# gnosis_vpn-update — the self-updater, the first binary of the toolkit.
-#
-# A lib + bin crate: all feature logic lives in the lib (so it is unit-testable
-# and gives nix-lib's `cargo … --lib` deps build a target), and src/main.rs is a
-# thin binary that parses the CLI and dispatches into it. Cross-binary helpers
-# (stdout NDJSON `output`, stderr `logging`) live here for now; they will move
-# to a shared crate once a second binary needs them.
+# gnosis_vpn-update — the self-updater: a lib with the logic (unit-testable, a
+# target for nix-lib's `--lib` deps build) and a thin src/main.rs.
 [package]
 edition = { workspace = true }
 license = { workspace = true }
@@ -15,20 +10,21 @@ version = { workspace = true }
 doctest = false
 
 [dependencies]
-anyhow             = { workspace = true }
-backon             = { workspace = true }
-bytesize           = { workspace = true }
-chrono             = { workspace = true }
-clap               = { workspace = true }
-exitcode           = { workspace = true }
-libc               = { workspace = true }
-reqwest            = { workspace = true }
-serde              = { workspace = true }
-serde_json         = { workspace = true }
-serde_with         = { workspace = true }
-sha2               = { workspace = true }
-thiserror          = { workspace = true }
-tokio              = { workspace = true }
-tracing            = { workspace = true }
-tracing-subscriber = { workspace = true }
-url                = { workspace = true }
+anyhow                    = { workspace = true }
+backon                    = { workspace = true }
+bytesize                  = { workspace = true }
+chrono                    = { workspace = true }
+clap                      = { workspace = true }
+exitcode                  = { workspace = true }
+gnosis_vpn-toolkit-common = { path = "../gnosis_vpn-toolkit-common" }
+libc                      = { workspace = true }
+reqwest                   = { workspace = true }
+rustix                    = { workspace = true }
+serde                     = { workspace = true }
+serde_json                = { workspace = true }
+serde_with                = { workspace = true }
+sha2                      = { workspace = true }
+thiserror                 = { workspace = true }
+tokio                     = { workspace = true }
+tracing                   = { workspace = true }
+url                       = { workspace = true }

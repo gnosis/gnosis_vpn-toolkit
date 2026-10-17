@@ -1,16 +1,10 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+pub use gnosis_vpn_toolkit_common::output::OutputFormat;
+
 use crate::manifest::Channel;
 use crate::vpn_status;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    /// Newline-delimited JSON on stdout — what gnosis_vpn-app asks for.
-    Json,
-    /// Human-readable lines on stdout (the default).
-    Plain,
-}
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ChannelArg {
