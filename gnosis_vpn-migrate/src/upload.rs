@@ -30,7 +30,9 @@ pub struct BundleSources {
     pub package_version: Option<String>,
     pub os: String,
     pub arch: String,
-    pub migrate_logs: Vec<PathBuf>,
+    pub migrate_log: PathBuf,
+    /// The installer's failure-time copy; the caller passes it only when it exists.
+    pub migrate_log_copy: Option<PathBuf>,
     pub extra_logs: Vec<PathBuf>,
 }
 
@@ -62,8 +64,9 @@ pub fn write_bundle(description: Option<&str>, sources: &BundleSources) -> Resul
     encoder
         .write_all(text.as_bytes())
         .map_err(|e| format!("cannot write bundle header: {e}"))?;
-    for path in &sources.migrate_logs {
-        write_section(&mut encoder, "migrate log", path)?;
+    write_section(&mut encoder, "migrate log", &sources.migrate_log)?;
+    if let Some(copy) = &sources.migrate_log_copy {
+        write_section(&mut encoder, "migrate log copy", copy)?;
     }
     for path in &sources.extra_logs {
         write_section(&mut encoder, "log", path)?;
@@ -220,7 +223,8 @@ mod tests {
             package_version: Some("2026.06.06+build.000005".to_string()),
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
-            migrate_logs: vec![dir.join("migrate.log"), dir.join("missing-copy.log")],
+            migrate_log: dir.join("migrate.log"),
+            migrate_log_copy: None,
             extra_logs: vec![dir.join("updates.log")],
         }
     }
@@ -242,8 +246,25 @@ mod tests {
         assert!(text.contains("OS: linux (x86_64)\n"));
         assert!(text.contains("===== user description =====\nit broke\n\n"));
         assert!(text.contains("===== migrate log (migrate.log) =====\nINFO migrating\n\n"));
-        assert!(text.contains("===== migrate log (missing-copy.log) unavailable: "));
+        assert!(!text.contains("migrate log copy"), "{text}");
         assert!(text.contains("===== log (updates.log) =====\nupdated\n\n"));
+    }
+
+    /// Both files are named migrate.log, so only the title tells them apart.
+    #[test]
+    fn a_present_copy_gets_its_own_section_and_a_missing_source_is_still_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let copy = dir.path().join("legacy").join("migrate.log");
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&copy, "ERROR copied\n").unwrap();
+        let mut sources = sources(dir.path());
+        sources.migrate_log_copy = Some(copy);
+        let text = decode(&write_bundle(None, &sources).unwrap());
+        assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
+        assert!(
+            text.contains("===== migrate log copy (migrate.log) =====\nERROR copied\n\n"),
+            "{text}"
+        );
     }
 
     #[test]
