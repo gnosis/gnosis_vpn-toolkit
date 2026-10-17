@@ -2,18 +2,21 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::path::Path;
-use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 
-/// A log file that cannot be opened degrades to stderr-only: unprivileged runs cannot open it and must still work.
+/// A log file that cannot be opened degrades to stderr-only; failing the installer over a log file would lose diagnostics, not gain them.
 pub fn setup(log_file: Option<&Path>) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let opened = log_file.map(open_append);
-    let writer = match &opened {
-        Some(Ok(file)) => BoxMakeWriter::new(std::io::stderr.and(Arc::clone(file))),
-        _ => BoxMakeWriter::new(std::io::stderr),
+    let (file, open_error) = match log_file.map(open_append) {
+        Some(Ok(file)) => (Some(file), None),
+        Some(Err(e)) => (None, Some(e)),
+        None => (None, None),
+    };
+    let writer = match file {
+        Some(file) => BoxMakeWriter::new(std::io::stderr.and(file)),
+        None => BoxMakeWriter::new(std::io::stderr),
     };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -21,17 +24,17 @@ pub fn setup(log_file: Option<&Path>) {
         // stderr is captured by the app or the installer, never a terminal, and the file copy stays greppable
         .with_ansi(false)
         .init();
-    if let (Some(path), Some(Err(e))) = (log_file, opened) {
-        tracing::warn!(path = %path.display(), error = %e, "log file not writable, logging to stderr only");
+    // Bypasses RUST_LOG on purpose: a missing log must be visible regardless of the level.
+    if let (Some(path), Some(e)) = (log_file, open_error) {
+        eprintln!("log file {} not writable ({e}), logging to stderr only", path.display());
     }
 }
 
-fn open_append(path: &Path) -> std::io::Result<Arc<File>> {
+fn open_append(path: &Path) -> std::io::Result<File> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
-    Ok(Arc::new(file))
+    OpenOptions::new().create(true).append(true).open(path)
 }
 
 #[cfg(test)]
@@ -43,8 +46,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("toolkit-logging-{}", std::process::id()));
         let path = dir.join("nested").join("migrate.log");
         use std::io::Write;
-        writeln!(&mut &*open_append(&path).unwrap(), "one").unwrap();
-        writeln!(&mut &*open_append(&path).unwrap(), "two").unwrap();
+        writeln!(open_append(&path).unwrap(), "one").unwrap();
+        writeln!(open_append(&path).unwrap(), "two").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
         fs::remove_dir_all(dir).unwrap();
     }
