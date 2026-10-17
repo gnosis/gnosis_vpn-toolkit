@@ -25,7 +25,7 @@ pub fn legacy_home() -> PathBuf {
     PathBuf::from("/Library/Application Support/GnosisVPN")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn legacy_home() -> PathBuf {
     PathBuf::from("/var/lib/gnosisvpn")
 }
@@ -40,7 +40,7 @@ pub fn migrate_log() -> PathBuf {
     PathBuf::from("/Library/Logs/GnosisVPN/installer/migrate.log")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn migrate_log() -> PathBuf {
     PathBuf::from("/var/log/gnosisvpn/migrate.log")
 }
@@ -66,7 +66,7 @@ pub fn log_sources() -> LogSources {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn log_sources() -> LogSources {
     // After a failed migration the installer copies the log next to the legacy data, since old package hooks may remove /var/log/gnosisvpn.
     LogSources {
@@ -97,7 +97,7 @@ pub fn user_layout() -> UserLayout {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub fn user_layout() -> UserLayout {
     UserLayout {
         data: PathBuf::from(".local/share/gnosisvpn"),
