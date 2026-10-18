@@ -18,6 +18,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 /// Default daemon socket location (matches `gnosis_vpn-lib::socket::root`).
+#[cfg(target_os = "linux")]
+pub const DEFAULT_SOCKET_PATH: &str = "/run/gnosisvpn/gnosisvpn.sock";
+#[cfg(target_os = "macos")]
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/gnosisvpn.sock";
 /// Environment variable overriding the socket path (matches the daemon/ctl).
 pub const ENV_VAR: &str = "GNOSISVPN_SOCKET_PATH";
