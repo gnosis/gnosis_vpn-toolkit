@@ -1,12 +1,13 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::Parser;
 
-use gnosis_vpn_migrate::cli::{Cli, Command, IdentityArgs, OutputFormat, StartCleanArgs, UploadLogArgs};
+use gnosis_vpn_migrate::cli::{Cli, Command, IdentityArgs, LayoutArgs, OutputFormat, StartCleanArgs, UploadLogArgs};
 use gnosis_vpn_migrate::migrate::{self, Failure, IdentityRequest, MigrateResult, Outcome, Stage};
 use gnosis_vpn_migrate::upload::{self, BundleSources};
-use gnosis_vpn_migrate::{layout, network, user};
+use gnosis_vpn_migrate::user::Account;
+use gnosis_vpn_migrate::{layout, network, relocate, user};
 use gnosis_vpn_toolkit_common::{logging, output, package_version};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -29,6 +30,7 @@ async fn main() {
         }
         Command::Identity(args) => require_root().and_then(|()| run_identity(&args)),
         Command::StartClean(args) => require_root().and_then(|()| run_start_clean(&args)),
+        Command::Layout(args) => require_root().and_then(|()| run_layout(&args)),
         Command::UploadLog(args) => match require_root() {
             Ok(()) => run_upload(&args).await,
             Err(failure) => Err(failure),
@@ -64,6 +66,7 @@ fn command_user(command: &Command) -> Option<String> {
     match command {
         Command::Identity(args) => Some(args.user.clone()),
         Command::StartClean(args) => args.user.clone(),
+        Command::Layout(args) => args.user.clone(),
         Command::UploadLog(_) | Command::Version => None,
     }
 }
@@ -108,6 +111,22 @@ fn run_start_clean(args: &StartCleanArgs) -> Result<Outcome, Failure> {
         }
     };
     migrate::start_clean(&args.legacy_home, Some((&account, &network)))
+}
+
+/// System files first, then the user's; a failed step is reported in the outcome and never a failure.
+fn run_layout(args: &LayoutArgs) -> Result<Outcome, Failure> {
+    let root_account = Account {
+        name: "root".to_string(),
+        uid: 0,
+        gid: 0,
+        home: PathBuf::from("/"),
+    };
+    let mut report = relocate::run(Path::new("/"), &relocate::system_steps(), &root_account)?;
+    if let Some(user_name) = &args.user {
+        let account = user::resolve(user_name, &args.legacy_home).map_err(|e| Failure::new(Stage::User, e))?;
+        report.extend(relocate::run(&account.home, &relocate::user_steps(), &account)?);
+    }
+    Ok(Outcome::Relocated(report))
 }
 
 async fn run_upload(args: &UploadLogArgs) -> Result<Outcome, Failure> {

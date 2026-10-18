@@ -13,7 +13,10 @@ pub const MIGRATED_FROM_FILE: &str = "migrated-from";
 pub const DIR_MODE: Mode = Mode::from_bits_truncate(0o700);
 pub const FILE_MODE: Mode = Mode::from_bits_truncate(0o600);
 // Shared parents (XDG, ~/Library subdirs) get the mode the OS itself would give them.
-const SHARED_DIR_MODE: Mode = Mode::from_bits_truncate(0o755);
+pub(crate) const SHARED_DIR_MODE: Mode = Mode::from_bits_truncate(0o755);
+
+/// The app's tauri identifier, which names its per-user dirs.
+pub const APP_ID: &str = "com.gnosisvpn.gnosisvpnclient";
 
 pub const LEGACY_CONFIG_DIR: &str = ".config";
 pub const LEGACY_IDENTITY_FILE: &str = "gnosisvpn-hopr.id";
@@ -61,7 +64,7 @@ pub fn log_sources() -> LogSources {
         extra: vec![
             installer.join("installer.log"),
             installer.join("postinstall.log"),
-            PathBuf::from("/var/log/gnosisvpn/updates.log"),
+            PathBuf::from("/Library/Logs/GnosisVPN/updates.log"),
         ],
     }
 }
@@ -72,7 +75,7 @@ pub fn log_sources() -> LogSources {
     LogSources {
         migrate: migrate_log(),
         migrate_copy: Some(legacy_home().join("migrate.log")),
-        extra: vec![PathBuf::from("/var/log/gnosisvpn/updates.log")],
+        extra: Vec::new(),
     }
 }
 

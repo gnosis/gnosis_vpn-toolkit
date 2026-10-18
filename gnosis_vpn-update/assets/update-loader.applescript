@@ -47,7 +47,7 @@ use scripting additions
 property appBundleId : "com.gnosisvpn.gnosisvpnclient"
 
 on run
-	set statusFile to "/Library/Logs/GnosisVPN/installer/update_status"
+	set statusFile to "/Library/Application Support/GnosisVPN/installer/update_status"
 	set ca to current application
 
 	-- Titled-only style mask: a title bar without close/minimize/zoom

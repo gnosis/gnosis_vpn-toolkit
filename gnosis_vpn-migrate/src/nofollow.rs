@@ -89,7 +89,35 @@ pub fn exists(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<bool> {
 }
 
 pub fn rename(dir: &OwnedFd, from: impl AsRef<OsStr>, to: impl AsRef<OsStr>) -> io::Result<()> {
-    Ok(rustix::fs::renameat(dir, from.as_ref(), dir, to.as_ref())?)
+    rename_across(dir, from, dir, to)
+}
+
+pub fn rename_across(
+    from_dir: &OwnedFd,
+    from: impl AsRef<OsStr>,
+    to_dir: &OwnedFd,
+    to: impl AsRef<OsStr>,
+) -> io::Result<()> {
+    Ok(rustix::fs::renameat(from_dir, from.as_ref(), to_dir, to.as_ref())?)
+}
+
+/// Removes a file, a symlink or a whole tree, never following a symlink.
+pub fn remove(parent: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<()> {
+    let name = name.as_ref();
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) == FileType::Directory {
+        return remove_tree(parent, name);
+    }
+    Ok(rustix::fs::unlinkat(parent, name, AtFlags::empty())?)
+}
+
+/// `true` when the dir was removed; one that is missing or still has entries is left alone.
+pub fn remove_empty_dir(parent: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<bool> {
+    match rustix::fs::unlinkat(parent, name.as_ref(), AtFlags::REMOVEDIR) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::NOTEMPTY | rustix::io::Errno::EXIST) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn sync(fd: &OwnedFd) -> io::Result<()> {

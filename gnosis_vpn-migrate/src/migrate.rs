@@ -117,6 +117,7 @@ pub enum Outcome {
     StartedClean {
         moved: Vec<Move>,
     },
+    Relocated(crate::relocate::Report),
     NothingToDo,
     Uploaded {
         uuid: String,
@@ -221,6 +222,18 @@ impl fmt::Display for Outcome {
                 write_moves(f, moved)
             }
             Outcome::NothingToDo => write!(f, "Nothing to move aside"),
+            Outcome::Relocated(report) if report.is_empty() => write!(f, "Layout already current; nothing to move"),
+            Outcome::Relocated(report) => {
+                writeln!(f, "Moved into the current layout:")?;
+                write_moves(f, &report.moved)?;
+                for path in &report.removed {
+                    writeln!(f, "  removed {}", path.display())?;
+                }
+                for problem in &report.failed {
+                    writeln!(f, "  FAILED {}: {}", problem.path.display(), problem.error)?;
+                }
+                Ok(())
+            }
             Outcome::Uploaded { uuid } => {
                 write!(
                     f,
