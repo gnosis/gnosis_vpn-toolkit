@@ -32,7 +32,6 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-const STATUS_FILE: &str = "/Library/Logs/GnosisVPN/installer/update_status";
 const APP_BUNDLE_NAME: &str = "GnosisVPNUpdateLoader.app";
 /// Matched against process command lines by the `dismiss` pkill fallback; the
 /// loader's executable and script paths all contain it.
@@ -87,7 +86,10 @@ pub async fn show() -> Loader {
 
     // The pid lets the applet detect this process dying without ever writing
     // "done" (see the module doc).
-    if let Err(e) = write_status(Path::new(STATUS_FILE), &format!("updating {}", std::process::id())) {
+    if let Err(e) = write_status(
+        &super::paths::update_status_path(),
+        &format!("updating {}", std::process::id()),
+    ) {
         tracing::warn!(error = %e, "cannot write loader status file; skipping loader window");
         return loader;
     }
@@ -118,7 +120,7 @@ pub async fn dismiss(loader: Loader) {
         return;
     }
 
-    if let Err(e) = write_status(Path::new(STATUS_FILE), "done") {
+    if let Err(e) = write_status(&super::paths::update_status_path(), "done") {
         tracing::warn!(error = %e, "cannot write done to loader status file; relying on pkill");
     }
     wait_for_loader_exit(PKILL_PATTERN, DISMISS_GRACE, DISMISS_POLL).await;
@@ -128,7 +130,7 @@ pub async fn dismiss(loader: Loader) {
         tracing::warn!(error = %e, "pkill fallback for loader failed to spawn");
     }
 
-    cleanup(Path::new(STATUS_FILE), loader.temp_dir.as_deref());
+    cleanup(&super::paths::update_status_path(), loader.temp_dir.as_deref());
 }
 
 /// Wait until no process matches `pattern` (the loader quit on its own — it

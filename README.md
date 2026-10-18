@@ -149,7 +149,7 @@ only; stdout still carries one result.
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
 selection (from the `/etc/gnosisvpn/config.toml` symlink target, falling back
-to the choice files under `/Library/Logs/GnosisVPN/installer/`) and pins it via
+to the choice files under `/Library/Application Support/GnosisVPN/installer/`) and pins it via
 `installer -applyChoiceChangesXML`, so a CLI-driven update never flips a rotsee
 install back to the package default (jura).
 
@@ -202,6 +202,11 @@ sudo gnosis_vpn-migrate identity --user <user> [--dry-run] [--replace]
 # networks/<network>/ dirs too, so the next start generates a fresh identity
 sudo gnosis_vpn-migrate start-clean [--user <user>]
                                     [--legacy-home <dir>] [--config-link <path>]
+
+# Move files the previous release kept elsewhere into their current locations
+# (macOS: installer choice files, updates.log) and, with --user, that user's
+# app settings and logs (Linux); idempotent, run by every postinstall
+sudo gnosis_vpn-migrate layout [--user <user>] [--legacy-home <dir>]
 
 # Bundle the migration log (plus installer/updater logs where present),
 # upload it and print the reference to quote
@@ -264,8 +269,8 @@ worker as uid 0.
 package versions, the optional description capped at 2000 characters, the
 migrate log — on Linux also `/var/lib/gnosisvpn/migrate.log`, where the
 installer copies it because an rpm upgrade's old `%postun` deletes
-`/var/log/gnosisvpn` — then the macOS installer logs and `updates.log` when
-present), a multipart POST of the first 4 MiB plus the size, then a PUT of the
+`/var/log/gnosisvpn` — then the macOS installer logs and
+`/Library/Logs/GnosisVPN/updates.log` when present), a multipart POST of the first 4 MiB plus the size, then a PUT of the
 whole bundle to the signed URL. It prints the returned reference to quote when
 reporting the problem.
 

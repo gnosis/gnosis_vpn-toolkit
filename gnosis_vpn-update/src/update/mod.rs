@@ -526,6 +526,11 @@ async fn drive_engine(
     let updater_version = None;
 
     install_result.map_err(|e| (UpdateStage::Install, e))?;
+    // The download is cache: nothing reads it after a successful install.
+    let _ = tokio::fs::remove_file(&artifact_path).await;
+    if let Some(path) = &choice_changes_path {
+        let _ = tokio::fs::remove_file(path).await;
+    }
     Ok(EngineOutcome {
         version: release.version.clone(),
         updater_version,

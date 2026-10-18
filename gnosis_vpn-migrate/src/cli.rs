@@ -27,6 +27,9 @@ pub enum Command {
     /// Move the legacy identity aside, and with --user that user's per-network dirs, for a fresh identity (root only).
     StartClean(StartCleanArgs),
 
+    /// Move files the previous release kept elsewhere into their current locations, with --user that user's app files too (root only).
+    Layout(LayoutArgs),
+
     /// Upload the migration log (plus installer and updater logs where present); prints the reference to quote (root only).
     UploadLog(UploadLogArgs),
 
@@ -70,6 +73,17 @@ pub struct StartCleanArgs {
     /// Symlink naming the chosen network's config
     #[arg(long, default_value_os_t = layout::config_link())]
     pub config_link: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct LayoutArgs {
+    /// Account whose app settings and logs are moved as well
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Legacy data dir, only to refuse an account whose home it is
+    #[arg(long, default_value_os_t = layout::legacy_home())]
+    pub legacy_home: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
