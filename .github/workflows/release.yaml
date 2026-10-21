@@ -1,8 +1,19 @@
 name: Close release
 on:
   workflow_dispatch:
+    inputs:
+      release_type:
+        description: Version type after release
+        required: true
+        type: choice
+        default: "patch"
+        options:
+          - rc
+          - patch
+          - minor
+          - major
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 permissions:
   contents: read
@@ -53,12 +64,12 @@ jobs:
       id-token: write
     steps:
       - name: Release version
-        uses: hoprnet/hopr-workflows/actions/release-version@c761aa03c00b93ec20c2c0a91c2ee6a2fac2a564 # release-version-v5.5.0
+        uses: hoprnet/hopr-workflows/actions/release-version@ab7f9eafdb4eeb9e60af573611b171381aeb761c # release-version-v5.4.0
         with:
           source_branch: ${{ github.ref_name }}
+          target_commitish: ${{ github.ref_name }}
           file: Cargo.toml
-          # main only accepts PRs, so the next version comes from the Bump version workflow.
-          bump_version: "false"
+          release_type: ${{ inputs.release_type }}
           cachix_cache_name: gnosis-vpn-toolkit
           cachix_auth_token: ${{ secrets.CACHIX_AUTH_TOKEN }}
           gcp_workload_identity_provider: projects/656686060169/locations/global/workloadIdentityPools/gnosisvpn-gh-pool/providers/github-provider
