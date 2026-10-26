@@ -74,6 +74,11 @@ pub fn create_file(dir: &OwnedFd, name: impl AsRef<OsStr>, mode: Mode) -> io::Re
     Ok(File::from(fd))
 }
 
+/// A dir at a path whose last component must not be a symlink.
+pub fn open_dir_path(path: &Path) -> io::Result<OwnedFd> {
+    Ok(rustix::fs::openat(CWD, path, DIR_FLAGS, Mode::empty())?)
+}
+
 /// Read-only open of a path whose last component must not be a symlink.
 pub fn open_file(path: &Path) -> io::Result<File> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;

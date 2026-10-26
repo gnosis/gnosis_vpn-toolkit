@@ -441,7 +441,12 @@ impl Legacy {
             self.config_dir
                 .with_file_name(format!("{}.migrated-{ts}", layout::LEGACY_CONFIG_DIR)),
         );
-        moved.push(rename_aside(&self.config_dir, config_aside)?);
+        // Held across the rename: the legacy home is service-owned, so the aside path could be swapped for a symlink.
+        let config_fd = nofollow::open_dir_path(&self.config_dir)
+            .map_err(|e| Failure::new(Stage::Legacy, with_path(&self.config_dir, &e)))?;
+        let config_move = rename_aside(&self.config_dir, config_aside)?;
+        lock_down(&config_fd).map_err(|e| Failure::new(Stage::Legacy, with_path(&config_move.to, &e)))?;
+        moved.push(config_move);
         if let Some(redb) = &self.redb {
             let aside = unique_aside(redb.with_file_name(format!("{}.migrated-{ts}", layout::PIX_DB_FILE)));
             moved.push(rename_aside(redb, aside)?);
@@ -453,6 +458,13 @@ impl Legacy {
         }
         Ok(moved)
     }
+}
+
+/// Keeps the old key and password from the service user and everyone else (GNO-1006); euid is root outside tests.
+fn lock_down(dir: &OwnedFd) -> io::Result<()> {
+    rustix::fs::fchown(dir, Some(rustix::process::geteuid()), Some(rustix::process::getegid()))?;
+    rustix::fs::fchmod(dir, layout::DIR_MODE)?;
+    Ok(())
 }
 
 fn rename_aside(from: &Path, to: PathBuf) -> Result<Move, Failure> {
@@ -1196,6 +1208,42 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    fn migrated_config_aside(fx: &Fixture) -> PathBuf {
+        let Outcome::Migrated { legacy, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected Migrated");
+        };
+        legacy[0].to.clone()
+    }
+
+    #[test]
+    fn the_migrated_legacy_config_is_locked_to_0700() {
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o775)).unwrap();
+        let aside = migrated_config_aside(&fx);
+        assert_eq!(mode(&aside), layout::DIR_MODE);
+        assert_eq!(fs::metadata(&aside).unwrap().uid(), uzers::get_effective_uid());
+    }
+
+    /// Only `just test-root` reaches this: taking the dir from another owner needs root.
+    #[test]
+    fn as_root_the_migrated_legacy_config_belongs_to_root() {
+        if !user::is_root() {
+            return;
+        }
+        let nobody = uzers::get_user_by_name("nobody").expect("a nobody account");
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        std::os::unix::fs::chown(&config, Some(nobody.uid()), Some(nobody.primary_group_id())).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o775)).unwrap();
+        let aside = migrated_config_aside(&fx);
+        let meta = fs::metadata(&aside).unwrap();
+        assert_eq!((meta.uid(), meta.gid()), (0, 0));
+        assert_eq!(mode(&aside), layout::DIR_MODE);
     }
 
     #[test]
