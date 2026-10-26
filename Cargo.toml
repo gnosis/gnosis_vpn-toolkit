@@ -55,7 +55,7 @@ tracing = { version = "~0.1.44", features = ["release_max_level_debug"] }
 tracing-subscriber = { version = "~0.3.23", features = ["env-filter"] }
 url = { version = "~2.5.8", features = ["serde"] }
 uzers = { version = "~0.12.2", default-features = false }
-zstd = "~0.14.2"
+zstd = "~0.14.3"
 
 # this profile focuses on the best runtime performance and the smallest binary
 # size (profiles are honored only at the workspace root)
