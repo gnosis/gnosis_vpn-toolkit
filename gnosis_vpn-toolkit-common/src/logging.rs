@@ -85,7 +85,13 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
 
         let fifo = dir.join("fifo.log");
-        rustix::fs::mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(open_append(&fifo).is_err());
         fs::remove_dir_all(dir).unwrap();
     }

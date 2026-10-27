@@ -260,14 +260,13 @@ mod tests {
         std::fs::write(&secret, "root-only bytes").unwrap();
         std::os::unix::fs::symlink(&secret, dir.path().join("migrate.log")).unwrap();
         let fifo = dir.path().join("fifo.log");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RUSR,
-            0,
-        )
-        .unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let mut sources = sources(dir.path());
         sources.extra_logs = vec![fifo];
         let text = decode(&write_bundle(None, &sources).unwrap());

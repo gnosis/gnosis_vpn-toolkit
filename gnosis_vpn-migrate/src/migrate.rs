@@ -1278,7 +1278,13 @@ mod tests {
         let target = fx.target();
         fs::create_dir_all(&target.data).unwrap();
         let fifo = target.data.join(layout::IDENTITY_FILE);
-        rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, Mode::RUSR, 0).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let Outcome::Conflict { mismatches, .. } = fx.run(false, false).unwrap() else {
             panic!("expected Conflict");
         };
