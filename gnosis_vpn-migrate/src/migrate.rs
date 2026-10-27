@@ -293,7 +293,7 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
     let user = req.account.name.clone();
     tracing::info!(%network, %user, files = plan.len(), target = %target.data.display(), "legacy identity found");
 
-    if target.exists() {
+    if target.exists()? {
         let mismatches = target.compare(&plan)?;
         if mismatches.is_empty() {
             tracing::info!(target = %target.data.display(), "destination already holds the legacy identity");
@@ -572,8 +572,21 @@ impl Target {
         }
     }
 
-    fn exists(&self) -> bool {
-        self.data.exists() || self.cache.exists()
+    /// Through the home handle, so a symlink at `networks/<net>` counts as present whether or not it resolves.
+    fn exists(&self) -> Result<bool, Failure> {
+        let home = nofollow::open_home(&self.home).map_err(destination(&self.home))?;
+        for (rel, path) in [(&self.data_rel, &self.data), (&self.cache_rel, &self.cache)] {
+            let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) else {
+                continue;
+            };
+            let Some(dir) = nofollow::find_dir(&home, parent).map_err(destination(path))? else {
+                continue;
+            };
+            if nofollow::exists(&dir, name).map_err(destination(path))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn path(&self, planned: &Planned) -> PathBuf {
@@ -1239,6 +1252,23 @@ mod tests {
             panic!("expected Conflict");
         };
         assert_eq!(mismatches[0].difference, Difference::Missing);
+    }
+
+    #[test]
+    fn a_dangling_symlink_at_the_network_dir_is_a_conflict_not_a_silent_replace() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        let target = fx.target();
+        fs::create_dir_all(target.data.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(fx._tmp.path().join("nowhere"), &target.data).unwrap();
+        let Outcome::Conflict { mismatches, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected Conflict");
+        };
+        assert_eq!(mismatches[0].difference, Difference::Missing);
+        assert!(
+            fs::symlink_metadata(&target.data).is_ok(),
+            "the symlink must stay in place"
+        );
     }
 
     #[test]
