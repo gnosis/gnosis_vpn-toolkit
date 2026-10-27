@@ -1,22 +1,27 @@
 //! Root-owned locations of the install engine, never caller-influenced so an untrusted invocation cannot redirect them.
-//! The engine only runs on macOS (`install_platform` is a stub on Linux), so these are macOS locations without a platform split.
+//! macOS locations: the choice paths stay ungated since the engine compiles on Linux, where `install_platform` refuses first.
 
 use std::path::{Path, PathBuf};
 
 const STATE_DIR: &str = "/Library/Application Support/GnosisVPN";
+#[cfg(target_os = "macos")]
 const CACHE_DIR: &str = "/Library/Caches/GnosisVPN";
+#[cfg(target_os = "macos")]
 const LOG_DIR: &str = "/Library/Logs/GnosisVPN";
 
 /// Downloaded packages; deleted after a successful install.
+#[cfg(target_os = "macos")]
 pub fn download_dir() -> PathBuf {
     Path::new(CACHE_DIR).join("updates")
 }
 
+#[cfg(target_os = "macos")]
 pub fn attempt_state_path() -> PathBuf {
     Path::new(STATE_DIR).join("last_update_attempt.json")
 }
 
 /// One line per finished update, rotated by newsyslog like the service log.
+#[cfg(target_os = "macos")]
 pub fn audit_log_path() -> PathBuf {
     Path::new(LOG_DIR).join("updates.log")
 }
@@ -44,6 +49,7 @@ pub fn loglevel_choice_path() -> PathBuf {
 }
 
 /// The loader app polls this for `updating <pid>` and `done`.
+#[cfg(target_os = "macos")]
 pub fn update_status_path() -> PathBuf {
     installer_choice_dir().join("update_status")
 }

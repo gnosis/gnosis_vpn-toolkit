@@ -2,7 +2,7 @@
 //!
 //! The client's distribution package carries installer "choices" (HOPR
 //! network: jura/rotsee, log level: info/debug). A GUI install records each
-//! selection in `/Library/Logs/GnosisVPN/installer/` and symlinks
+//! selection in `/Library/Application Support/GnosisVPN/installer/` and symlinks
 //! `/etc/gnosisvpn/config.toml` to the chosen network's config. A CLI
 //! `installer(8)` run — which is how this updater installs — applies the
 //! Distribution.xml *defaults* instead (jura, debug), whose choice packages
