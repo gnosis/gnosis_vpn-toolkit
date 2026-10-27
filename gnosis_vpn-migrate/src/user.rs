@@ -21,12 +21,15 @@ pub fn is_root() -> bool {
 
 /// Refuses root (the client never runs a worker as uid 0) and a home that is missing or is the legacy dir itself.
 pub fn resolve(name: &str, legacy_home: &Path) -> Result<Account, String> {
-    if name == "root" {
-        return Err("refusing to migrate into root's home: the client never runs a worker as uid 0".to_string());
-    }
     let Some(user) = uzers::get_user_by_name(name) else {
         return Err(format!("unknown user {name}"));
     };
+    // By uid, not name: aliases like `toor` share uid 0.
+    if user.uid() == 0 {
+        return Err(format!(
+            "refusing to migrate into {name}'s home: the client never runs a worker as uid 0"
+        ));
+    }
     let home = user.home_dir().to_path_buf();
     if !home.is_dir() {
         return Err(format!("home of {name} is not a directory: {}", home.display()));
@@ -66,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn root_is_refused_before_any_lookup() {
+    fn root_is_refused() {
         let err = resolve("root", Path::new("/var/lib/gnosisvpn")).unwrap_err();
         assert!(err.contains("uid 0"), "{err}");
     }
