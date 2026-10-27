@@ -1,8 +1,9 @@
 //! Logs go to stderr (stdout is the protocol), level via `RUST_LOG`, optionally teed into a log file.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::os::fd::OwnedFd;
+use std::path::{Component, Path};
 
 use rustix::fs::{CWD, FileType, Mode, OFlags};
 use tracing_subscriber::EnvFilter;
@@ -32,14 +33,15 @@ pub fn setup(log_file: Option<&Path>) {
     }
 }
 
-/// The legacy release gave the log dir to the service account, so a planted symlink is never followed and a FIFO never blocks (O_NONBLOCK).
+/// The legacy release gave the log dir to the service account, so no path component is ever followed and a FIFO never blocks (O_NONBLOCK).
 fn open_append(path: &Path) -> io::Result<File> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::other("not a file path"));
+    };
+    let dir = ensure_dir_nofollow(parent)?;
     let flags =
         OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let fd = rustix::fs::openat(CWD, path, flags, Mode::from_bits_truncate(0o644))?;
+    let fd = rustix::fs::openat(&dir, name, flags, Mode::from_bits_truncate(0o644))?;
     let stat = rustix::fs::fstat(&fd)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Err(io::Error::other("not a regular file"));
@@ -50,13 +52,42 @@ fn open_append(path: &Path) -> io::Result<File> {
     Ok(File::from(fd))
 }
 
+/// `create_dir_all` resolves symlinks in every component; this walks them one no-follow handle at a time instead.
+fn ensure_dir_nofollow(path: &Path) -> io::Result<OwnedFd> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let start = if path.is_absolute() { "/" } else { "." };
+    let mut dir = rustix::fs::openat(CWD, start, flags, Mode::empty())?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        dir = match rustix::fs::openat(&dir, name, flags, Mode::empty()) {
+            Ok(child) => child,
+            Err(rustix::io::Errno::NOENT) => {
+                rustix::fs::mkdirat(&dir, name, Mode::from_bits_truncate(0o755))?;
+                rustix::fs::openat(&dir, name, flags, Mode::empty())?
+            }
+            Err(e) => return Err(e.into()),
+        };
+    }
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    /// Canonical so the no-follow walk is not tripped by the `/var -> /private/var` link under macOS temp dirs.
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("toolkit-logging-{tag}-{}", std::process::id()))
+    }
 
     #[test]
     fn open_append_creates_the_directory_and_appends() {
-        let dir = std::env::temp_dir().join(format!("toolkit-logging-{}", std::process::id()));
+        let dir = temp_root("append");
         let path = dir.join("nested").join("migrate.log");
         use std::io::Write;
         writeln!(open_append(&path).unwrap(), "one").unwrap();
@@ -68,7 +99,7 @@ mod tests {
     #[test]
     fn open_append_reports_an_unwritable_location() {
         // A file where a directory is needed makes the open fail without needing privileges.
-        let dir = std::env::temp_dir().join(format!("toolkit-logging-file-{}", std::process::id()));
+        let dir = temp_root("file");
         fs::create_dir_all(&dir).unwrap();
         let blocker = dir.join("blocker");
         fs::write(&blocker, "x").unwrap();
@@ -78,7 +109,7 @@ mod tests {
 
     #[test]
     fn open_append_refuses_a_planted_symlink_hard_link_or_fifo() {
-        let dir = std::env::temp_dir().join(format!("toolkit-logging-planted-{}", std::process::id()));
+        let dir = temp_root("planted");
         fs::create_dir_all(&dir).unwrap();
         let victim = dir.join("victim");
         fs::write(&victim, "untouched").unwrap();
@@ -99,6 +130,17 @@ mod tests {
                 .success()
         );
         assert!(open_append(&fifo).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_append_refuses_a_symlinked_parent() {
+        let dir = temp_root("parent");
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.join("installer")).unwrap();
+        assert!(open_append(&dir.join("installer").join("migrate.log")).is_err());
+        assert!(!elsewhere.join("migrate.log").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 }
