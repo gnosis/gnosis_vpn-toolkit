@@ -221,7 +221,8 @@ gnosis_vpn-migrate version
 ```
 
 `identity` outcomes: `Migrated`, `AlreadyMigrated` (the destination already
-holds byte-identical copies of every legacy file), `NothingToMigrate` (no
+holds byte-identical copies of every legacy file; a legacy dir still in place
+is moved aside as after a migration), `NothingToMigrate` (no
 legacy `gnosisvpn-hopr.id`, e.g. a fresh install or after `--reset-identity`),
 `WouldMigrate` (`--dry-run`), `Conflict` (the user already has a _different_
 identity on that network: re-run with `--replace` to keep the legacy one — the

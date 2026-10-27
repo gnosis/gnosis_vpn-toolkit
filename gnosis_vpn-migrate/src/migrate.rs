@@ -106,6 +106,7 @@ pub enum Outcome {
     AlreadyMigrated {
         network: String,
         user: String,
+        legacy: Vec<Move>,
     },
     NothingToMigrate {
         legacy_home: PathBuf,
@@ -184,11 +185,16 @@ impl fmt::Display for Outcome {
                 )?;
                 write_moves(f, files)
             }
-            Outcome::AlreadyMigrated { network, user } => {
+            Outcome::AlreadyMigrated { network, user, legacy } if legacy.is_empty() => {
                 write!(
                     f,
                     "Identity already migrated for user {user} on network {network}; nothing to do"
                 )
+            }
+            Outcome::AlreadyMigrated { network, user, legacy } => {
+                writeln!(f, "Identity already migrated for user {user} on network {network}")?;
+                writeln!(f, "Legacy files moved aside:")?;
+                write_moves(f, legacy)
             }
             Outcome::NothingToMigrate { legacy_home } => {
                 write!(
@@ -291,7 +297,13 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
         let mismatches = target.compare(&plan)?;
         if mismatches.is_empty() {
             tracing::info!(target = %target.data.display(), "destination already holds the legacy identity");
-            return Ok(Outcome::AlreadyMigrated { network, user });
+            // An earlier run stopped after publishing, so the old key is still readable by the service user.
+            let legacy = if req.dry_run {
+                Vec::new()
+            } else {
+                legacy.move_aside(&timestamp())?
+            };
+            return Ok(Outcome::AlreadyMigrated { network, user, legacy });
         }
         for m in &mismatches {
             tracing::warn!(legacy = %m.legacy.display(), target = %m.target.display(), difference = ?m.difference, "destination differs");
@@ -1148,8 +1160,34 @@ mod tests {
             Outcome::NothingToMigrate { .. }
         ));
         fs::rename(&legacy[0].to, &legacy[0].from).unwrap();
-        assert!(matches!(fx.run(false, false).unwrap(), Outcome::AlreadyMigrated { .. }));
-        assert!(fx.legacy.join(".config").exists(), "AlreadyMigrated must touch nothing");
+        let Outcome::AlreadyMigrated { legacy, .. } = fx.run(true, false).unwrap() else {
+            panic!("expected AlreadyMigrated");
+        };
+        assert!(legacy.is_empty(), "a dry run must touch nothing");
+        assert!(fx.legacy.join(".config").exists());
+    }
+
+    #[test]
+    fn already_migrated_finishes_moving_the_legacy_aside() {
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass", "redb"]);
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        let Outcome::Migrated { legacy, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected Migrated");
+        };
+        // As if the run had stopped right after publishing.
+        for m in &legacy {
+            fs::rename(&m.to, &m.from).unwrap();
+        }
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let Outcome::AlreadyMigrated { legacy, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected AlreadyMigrated");
+        };
+        assert_eq!(legacy.len(), 2);
+        assert!(!config.exists());
+        assert!(!fx.legacy.join(layout::PIX_DB_FILE).exists());
+        assert_eq!(mode(&legacy[0].to), layout::DIR_MODE);
     }
 
     #[test]
@@ -1413,6 +1451,7 @@ mod tests {
             Outcome::AlreadyMigrated {
                 network: NETWORK.into(),
                 user: "u".into(),
+                legacy: vec![],
             },
             Outcome::WouldMigrate {
                 network: NETWORK.into(),
