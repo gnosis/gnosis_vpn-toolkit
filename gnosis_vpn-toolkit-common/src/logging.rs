@@ -1,8 +1,10 @@
 //! Logs go to stderr (stdout is the protocol), level via `RUST_LOG`, optionally teed into a log file.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
+use std::io;
 use std::path::Path;
 
+use rustix::fs::{CWD, FileType, Mode, OFlags};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 
@@ -30,11 +32,19 @@ pub fn setup(log_file: Option<&Path>) {
     }
 }
 
-fn open_append(path: &Path) -> std::io::Result<File> {
+/// The legacy release gave the log dir to the service account, so a planted symlink is never followed and a FIFO never blocks (O_NONBLOCK).
+fn open_append(path: &Path) -> io::Result<File> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    OpenOptions::new().create(true).append(true).open(path)
+    let flags =
+        OFlags::WRONLY | OFlags::APPEND | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::openat(CWD, path, flags, Mode::from_bits_truncate(0o644))?;
+    let stat = rustix::fs::fstat(&fd)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(io::Error::other("not a regular file"));
+    }
+    Ok(File::from(fd))
 }
 
 #[cfg(test)]
@@ -60,6 +70,23 @@ mod tests {
         let blocker = dir.join("blocker");
         fs::write(&blocker, "x").unwrap();
         assert!(open_append(&blocker.join("migrate.log")).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn open_append_refuses_a_planted_symlink_or_fifo() {
+        let dir = std::env::temp_dir().join(format!("toolkit-logging-planted-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        let link = dir.join("link.log");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        assert!(open_append(&link).is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
+
+        let fifo = dir.join("fifo.log");
+        rustix::fs::mknodat(CWD, &fifo, FileType::Fifo, Mode::RUSR | Mode::WUSR, 0).unwrap();
+        assert!(open_append(&fifo).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
 }
