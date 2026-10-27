@@ -48,10 +48,9 @@ pub fn migrate_log() -> PathBuf {
     PathBuf::from("/var/log/gnosisvpn/migrate.log")
 }
 
-/// What `upload-log` bundles, in order; the migrate log is always reported, its copy only when present.
+/// What `upload-log` bundles, in order; the migrate log is always reported.
 pub struct LogSources {
     pub migrate: PathBuf,
-    pub migrate_copy: Option<PathBuf>,
     pub extra: Vec<PathBuf>,
 }
 
@@ -60,7 +59,6 @@ pub fn log_sources() -> LogSources {
     let installer = PathBuf::from("/Library/Logs/GnosisVPN/installer");
     LogSources {
         migrate: migrate_log(),
-        migrate_copy: None,
         extra: vec![
             installer.join("installer.log"),
             installer.join("postinstall.log"),
@@ -71,10 +69,8 @@ pub fn log_sources() -> LogSources {
 
 #[cfg(target_os = "linux")]
 pub fn log_sources() -> LogSources {
-    // After a failed migration the installer copies the log next to the legacy data, since old package hooks may remove /var/log/gnosisvpn.
     LogSources {
         migrate: migrate_log(),
-        migrate_copy: Some(legacy_home().join("migrate.log")),
         extra: Vec::new(),
     }
 }

@@ -32,8 +32,6 @@ pub struct BundleSources {
     pub os: String,
     pub arch: String,
     pub migrate_log: PathBuf,
-    /// The installer's failure-time copy; the caller passes it only when it exists.
-    pub migrate_log_copy: Option<PathBuf>,
     pub extra_logs: Vec<PathBuf>,
 }
 
@@ -66,16 +64,13 @@ pub fn write_bundle(description: Option<&str>, sources: &BundleSources) -> Resul
         .write_all(text.as_bytes())
         .map_err(|e| format!("cannot write bundle header: {e}"))?;
     write_section(&mut encoder, "migrate log", &sources.migrate_log)?;
-    if let Some(copy) = &sources.migrate_log_copy {
-        write_section(&mut encoder, "migrate log copy", copy)?;
-    }
     for path in &sources.extra_logs {
         write_section(&mut encoder, "log", path)?;
     }
     encoder.finish().map_err(|e| format!("cannot finish compression: {e}"))
 }
 
-// Headers name the file, not its path, as bundles go to support; the Linux copy is service-owned, so no symlinks or FIFOs.
+// Headers name the file, not its path, as bundles go to support; never follow a planted symlink or block on a FIFO.
 fn write_section<W: Write>(encoder: &mut Encoder<'_, W>, title: &str, path: &Path) -> Result<(), String> {
     let source = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
     let file = match nofollow::open_regular_path(path) {
@@ -225,7 +220,6 @@ mod tests {
             os: "linux".to_string(),
             arch: "x86_64".to_string(),
             migrate_log: dir.join("migrate.log"),
-            migrate_log_copy: None,
             extra_logs: vec![dir.join("updates.log")],
         }
     }
@@ -247,25 +241,16 @@ mod tests {
         assert!(text.contains("OS: linux (x86_64)\n"));
         assert!(text.contains("===== user description =====\nit broke\n\n"));
         assert!(text.contains("===== migrate log (migrate.log) =====\nINFO migrating\n\n"));
-        assert!(!text.contains("migrate log copy"), "{text}");
         assert!(text.contains("===== log (updates.log) =====\nupdated\n\n"));
     }
 
-    /// Both files are named migrate.log, so only the title tells them apart.
     #[test]
-    fn a_present_copy_gets_its_own_section_and_a_missing_source_is_still_reported() {
+    fn a_missing_source_is_still_reported() {
         let dir = tempfile::tempdir().unwrap();
-        let copy = dir.path().join("legacy").join("migrate.log");
-        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
-        std::fs::write(&copy, "ERROR copied\n").unwrap();
-        let mut sources = sources(dir.path());
-        sources.migrate_log_copy = Some(copy);
-        let text = decode(&write_bundle(None, &sources).unwrap());
+        std::fs::write(dir.path().join("updates.log"), "updated\n").unwrap();
+        let text = decode(&write_bundle(None, &sources(dir.path())).unwrap());
         assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
-        assert!(
-            text.contains("===== migrate log copy (migrate.log) =====\nERROR copied\n\n"),
-            "{text}"
-        );
+        assert!(text.contains("===== log (updates.log) =====\nupdated\n\n"), "{text}");
     }
 
     #[test]
@@ -284,14 +269,11 @@ mod tests {
         )
         .unwrap();
         let mut sources = sources(dir.path());
-        sources.migrate_log_copy = Some(fifo);
+        sources.extra_logs = vec![fifo];
         let text = decode(&write_bundle(None, &sources).unwrap());
         assert!(!text.contains("root-only bytes"), "{text}");
         assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
-        assert!(
-            text.contains("===== migrate log copy (fifo.log) unavailable: "),
-            "{text}"
-        );
+        assert!(text.contains("===== log (fifo.log) unavailable: "), "{text}");
     }
 
     #[test]

@@ -272,9 +272,7 @@ worker as uid 0.
 `GNOSISVPN_LOG_UPLOAD_API_URL` or `--api-url`): one zstd frame of plain text,
 `===== <title> =====` sections (system info with the toolkit and installed
 package versions, the optional description capped at 2000 characters, the
-migrate log — on Linux also `/var/lib/gnosisvpn/migrate.log`, where the
-installer copies it because an rpm upgrade's old `%postun` deletes
-`/var/log/gnosisvpn` — then the macOS installer logs and
+migrate log, then the macOS installer logs and
 `/Library/Logs/GnosisVPN/updates.log` when present), a multipart POST of the first 4 MiB plus the size, then a PUT of the
 whole bundle to the signed URL. It prints the returned reference to quote when
 reporting the problem.

@@ -138,7 +138,6 @@ async fn run_upload(args: &UploadLogArgs) -> Result<Outcome, Failure> {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         migrate_log: logs.migrate,
-        migrate_log_copy: logs.migrate_copy.filter(|p| p.exists()),
         extra_logs: logs.extra.into_iter().filter(|p| p.exists()).collect(),
     };
     let bundle = upload::write_bundle(args.description.as_deref(), &sources).map_err(fail)?;
