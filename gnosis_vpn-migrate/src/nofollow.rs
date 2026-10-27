@@ -1,6 +1,6 @@
 //! Root writes into a tree the user controls: every step goes through a held dir handle and never follows a symlink.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::OwnedFd;
@@ -8,6 +8,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
 use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags};
+use rustix::process::{getegid, geteuid};
 
 use crate::user::{self, Account};
 
@@ -163,6 +164,53 @@ pub fn remove_tree(parent: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<()> 
         }
     }
     Ok(rustix::fs::unlinkat(parent, name, AtFlags::REMOVEDIR)?)
+}
+
+/// The names in `dir`, without `.` and `..`.
+pub fn entries(dir: &OwnedFd) -> io::Result<Vec<OsString>> {
+    let mut names = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = OsStr::from_bytes(entry.file_name().to_bytes());
+        if name != "." && name != ".." {
+            names.push(name.to_os_string());
+        }
+    }
+    Ok(names)
+}
+
+/// Hands every entry at and below `name` owned by `from_uid` to root (the euid); returns how many changed owner.
+pub fn reown_tree(parent: &OwnedFd, name: impl AsRef<OsStr>, from_uid: u32) -> io::Result<usize> {
+    let name = name.as_ref();
+    let stat = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return reown_entry(parent, name, &stat, from_uid);
+    }
+    let dir = open_dir(parent, name)?;
+    let mut reowned = 0;
+    // The open handle's owner, not the earlier stat's, so a dir swapped in between is judged by what is really there.
+    if rustix::fs::fstat(&dir)?.st_uid == from_uid {
+        rustix::fs::fchown(&dir, Some(geteuid()), Some(getegid()))?;
+        reowned += 1;
+    }
+    // A dir owned by someone else may still hold the service account's files.
+    for child in entries(&dir)? {
+        reowned += reown_tree(&dir, &child, from_uid)?;
+    }
+    Ok(reowned)
+}
+
+/// Only the link itself for a symlink; a hard-linked file is left as is, since its other name may be anywhere.
+fn reown_entry(dir: &OwnedFd, name: &OsStr, stat: &rustix::fs::Stat, from_uid: u32) -> io::Result<usize> {
+    if stat.st_uid != from_uid {
+        return Ok(0);
+    }
+    if stat.st_nlink != 1 {
+        tracing::warn!(name = %name.display(), "refusing to re-own an entry with more than one hard link");
+        return Ok(0);
+    }
+    rustix::fs::chownat(dir, name, Some(geteuid()), Some(getegid()), AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(1)
 }
 
 // Some filesystems report no type in the dir entry.

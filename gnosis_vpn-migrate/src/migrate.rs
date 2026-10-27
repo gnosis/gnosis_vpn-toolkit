@@ -1,10 +1,12 @@
 //! The migration: enumerate, compare, copy into a staging dir, verify, rename into place. Nothing is ever deleted.
 //! Root writes into the user's home only through `nofollow`, so a symlink the user plants cannot redirect them.
 
+use std::ffi::OsStr;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use exitcode::ExitCode;
@@ -424,6 +426,7 @@ struct Legacy {
     home_path: PathBuf,
     config: OwnedFd,
     config_dir: PathBuf,
+    owner_uid: u32,
     has_redb: bool,
     sources: Vec<Source>,
 }
@@ -441,6 +444,10 @@ impl Legacy {
         else {
             return Ok(None);
         };
+        // Read before anything moves: the sweep after a migration takes this account's files away.
+        let owner_uid = rustix::fs::fstat(&config)
+            .map_err(|e| legacy_failure(&config_dir, &e.into()))?
+            .st_uid;
         let config_has =
             |name: &str| nofollow::exists(&config, name).map_err(|e| legacy_failure(&config_dir.join(name), &e));
         if !config_has(layout::LEGACY_IDENTITY_FILE)? {
@@ -490,6 +497,7 @@ impl Legacy {
             home_path: home_path.to_path_buf(),
             config,
             config_dir,
+            owner_uid,
             has_redb,
             sources,
         }))
@@ -524,6 +532,7 @@ impl Legacy {
             let aside = format!("{}.migrated-{ts}", layout::PIX_DB_FILE);
             moved.push(rename_aside(&self.home, &self.home_path, layout::PIX_DB_FILE, aside)?);
         }
+        secure_leftovers(&self.home, &self.home_path, self.owner_uid);
         nofollow::sync(&self.home).map_err(|e| legacy_failure(&self.home_path, &e))?;
         Ok(moved)
     }
@@ -534,6 +543,55 @@ fn lock_down(dir: &OwnedFd) -> io::Result<()> {
     rustix::fs::fchown(dir, Some(rustix::process::geteuid()), Some(rustix::process::getegid()))?;
     rustix::fs::fchmod(dir, layout::DIR_MODE)?;
     Ok(())
+}
+
+/// The installer deletes the service account and a later one may reuse its uid (GNO-960), so root takes what it owned.
+/// Best effort: a rerun finds nothing to migrate and never sweeps again, so one bad entry must not stop the rest.
+fn secure_leftovers(home: &OwnedFd, home_path: &Path, legacy_uid: u32) -> Vec<PathBuf> {
+    let names = match nofollow::entries(home) {
+        Ok(names) => names,
+        Err(e) => {
+            tracing::warn!(path = %home_path.display(), error = %e, "cannot list the legacy home to secure it");
+            return Vec::new();
+        }
+    };
+    let mut secured = Vec::new();
+    for name in names {
+        let path = home_path.join(&name);
+        match secure_entry(home, &name, legacy_uid) {
+            Ok((false, 0)) => {}
+            Ok((locked, reowned)) => {
+                tracing::info!(path = %path.display(), locked, reowned, "legacy entry secured");
+                secured.push(path);
+            }
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "cannot secure legacy entry"),
+        }
+    }
+    secured
+}
+
+fn secure_entry(home: &OwnedFd, name: &OsStr, legacy_uid: u32) -> io::Result<(bool, usize)> {
+    let locked = lock_config_dir(home, name)?;
+    // A root-owned `.config` names no service account, and re-owning uid 0 would strip the updater's root:gnosisvpn groups.
+    if legacy_uid == 0 {
+        return Ok((locked, 0));
+    }
+    let reowned = nofollow::reown_tree(home, name, legacy_uid)?;
+    Ok((locked, reowned))
+}
+
+/// Every `.config*` dir may hold an identity: a leftover one, or a `start-clean` backup.
+fn lock_config_dir(home: &OwnedFd, name: &OsStr) -> io::Result<bool> {
+    if !name.as_bytes().starts_with(layout::LEGACY_CONFIG_DIR.as_bytes()) {
+        return Ok(false);
+    }
+    let stat = rustix::fs::statat(home, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?;
+    let is_dir = rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Directory;
+    if !is_dir {
+        return Ok(false);
+    }
+    lock_down(&nofollow::open_dir(home, name)?)?;
+    Ok(true)
 }
 
 fn rename_aside(home: &OwnedFd, home_path: &Path, name: &str, aside: String) -> Result<Move, Failure> {
@@ -1519,6 +1577,134 @@ mod tests {
         let meta = fs::metadata(&aside).unwrap();
         assert_eq!((meta.uid(), meta.gid()), (0, 0));
         assert_eq!(mode(&aside), layout::DIR_MODE);
+    }
+
+    fn with_leftovers(fx: &Fixture) {
+        fs::create_dir_all(fx.legacy.join(".cache/x")).unwrap();
+        fs::write(fx.legacy.join(".cache/x/y"), "cached").unwrap();
+        fs::write(fx.legacy.join(".tmp123"), "tmp").unwrap();
+    }
+
+    fn secured_names(fx: &Fixture, legacy_uid: u32) -> Vec<String> {
+        let home = nofollow::open_home(&fx.legacy).unwrap();
+        let mut names: Vec<String> = secure_leftovers(&home, &fx.legacy, legacy_uid)
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_migration_secures_the_legacy_owned_leftovers() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        with_leftovers(&fx);
+        let names = secured_names(&fx, uzers::get_effective_uid());
+        assert_eq!(names, vec![".cache", ".config", ".tmp123"]);
+    }
+
+    #[test]
+    fn entries_owned_by_someone_else_are_left_alone() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        with_leftovers(&fx);
+        fs::set_permissions(fx.legacy.join(".tmp123"), fs::Permissions::from_mode(0o664)).unwrap();
+        let names = secured_names(&fx, uzers::get_effective_uid() + 1);
+        assert_eq!(names, vec![".config"], "only the lock, no re-own");
+        assert_eq!(mode(&fx.legacy.join(".tmp123")), Mode::from_bits_truncate(0o664));
+    }
+
+    #[test]
+    fn a_leftover_config_dir_is_locked_to_0700_only_after_a_migration() {
+        let fx = fixture();
+        let open = Mode::from_bits_truncate(0o775);
+        let leftovers = [".config-jura-dev", ".config.20260101000000.bak"].map(|name| fx.legacy.join(name));
+        for dir in &leftovers {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(layout::LEGACY_IDENTITY_FILE), "other id").unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        assert!(matches!(
+            fx.run(false, false).unwrap(),
+            Outcome::NothingToMigrate { .. }
+        ));
+        fx.with_legacy(&["id"]);
+        let target = fx.target();
+        fs::create_dir_all(&target.data).unwrap();
+        fs::write(target.data.join(layout::IDENTITY_FILE), "fresh id").unwrap();
+        assert!(matches!(fx.run(false, false).unwrap(), Outcome::Conflict { .. }));
+        for dir in &leftovers {
+            assert_eq!(mode(dir), open, "{} before a migration", dir.display());
+        }
+
+        assert!(matches!(fx.run(false, true).unwrap(), Outcome::Migrated { .. }));
+        for dir in &leftovers {
+            assert_eq!(mode(dir), layout::DIR_MODE, "{}", dir.display());
+            assert_eq!(fs::metadata(dir).unwrap().uid(), uzers::get_effective_uid());
+        }
+    }
+
+    #[test]
+    fn a_planted_symlink_in_the_legacy_home_is_never_followed() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        let outside_dir = fx._tmp.path().join("outside_dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::set_permissions(&outside_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let outside_file = fx._tmp.path().join("outside_file");
+        fs::write(&outside_file, "root-only bytes").unwrap();
+        fs::set_permissions(&outside_file, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::create_dir_all(fx.legacy.join(".cache")).unwrap();
+        let config_link = fx.legacy.join(".config-evil");
+        let cache_link = fx.legacy.join(".cache/link");
+        std::os::unix::fs::symlink(&outside_dir, &config_link).unwrap();
+        std::os::unix::fs::symlink(&outside_file, &cache_link).unwrap();
+
+        assert!(matches!(fx.run(false, false).unwrap(), Outcome::Migrated { .. }));
+        assert_eq!(mode(&outside_dir), Mode::from_bits_truncate(0o755));
+        assert_eq!(mode(&outside_file), Mode::from_bits_truncate(0o644));
+        assert_eq!(fs::read_to_string(&outside_file).unwrap(), "root-only bytes");
+        for link in [&config_link, &cache_link] {
+            assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        }
+    }
+
+    /// Only `just test-root` reaches this: handing files to `nobody` and back needs root.
+    #[test]
+    fn as_root_leftovers_belong_to_root_and_foreign_entries_keep_their_owner() {
+        if !user::is_root() {
+            return;
+        }
+        let nobody = uzers::get_user_by_name("nobody").expect("a nobody account");
+        let (uid, gid) = (nobody.uid(), nobody.primary_group_id());
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        with_leftovers(&fx);
+        let outside_file = fx._tmp.path().join("outside_file");
+        fs::write(&outside_file, "theirs").unwrap();
+        // Stands in for the updater's root:gnosisvpn files.
+        let updater = fx.legacy.join("updater");
+        fs::write(&updater, "root's").unwrap();
+        std::os::unix::fs::chown(&updater, Some(0), Some(gid)).unwrap();
+        let link = fx.legacy.join(".cache/link");
+        std::os::unix::fs::symlink(&outside_file, &link).unwrap();
+        let legacy_owned = [".config", ".cache", ".cache/x", ".cache/x/y", ".tmp123"].map(|rel| fx.legacy.join(rel));
+        for path in legacy_owned.iter().chain([&outside_file]) {
+            std::os::unix::fs::chown(path, Some(uid), Some(gid)).unwrap();
+        }
+        std::os::unix::fs::lchown(&link, Some(uid), Some(gid)).unwrap();
+
+        assert!(matches!(fx.run(false, false).unwrap(), Outcome::Migrated { .. }));
+        let owner = |path: &Path| {
+            let meta = fs::symlink_metadata(path).unwrap();
+            (meta.uid(), meta.gid())
+        };
+        for path in legacy_owned.iter().skip(1).chain([&link]) {
+            assert_eq!(owner(path), (0, 0), "{}", path.display());
+        }
+        assert_eq!(owner(&updater), (0, gid));
+        assert_eq!(owner(&outside_file), (uid, gid));
     }
 
     #[test]

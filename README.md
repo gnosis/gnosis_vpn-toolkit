@@ -190,6 +190,9 @@ The network is the installer's choice, read offline from the
 | cache | `~/.cache/gnosisvpn/networks/<network>/hopr.safe`                       | `~/Library/Caches/GnosisVPN/networks/<network>/hopr.safe`      |
 
 Directories are `0700`, files `0600`, everything created is owned by the user.
+After a migration, everything left in the legacy home that the service account
+owns is handed to root, and every `.config*` dir there is locked to root-only
+`0700`, so a later account reusing the uid reads nothing.
 
 ### Usage
 
