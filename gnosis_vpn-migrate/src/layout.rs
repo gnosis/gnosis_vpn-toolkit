@@ -48,7 +48,7 @@ pub fn migrate_log() -> PathBuf {
     PathBuf::from("/var/log/gnosisvpn/migrate.log")
 }
 
-/// Log files `upload-log` bundles, in bundle order; the migrate log comes first and is always reported, the copy only when present.
+/// What `upload-log` bundles, in order; the migrate log is always reported, its copy only when present.
 pub struct LogSources {
     pub migrate: PathBuf,
     pub migrate_copy: Option<PathBuf>,

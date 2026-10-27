@@ -629,24 +629,21 @@ impl Networks {
         }
     }
 
-    fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<Move>, Failure> {
+    fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<(Place, Move)>, Failure> {
         let mut moved = Vec::new();
         for place in [Place::Data, Place::Cache] {
             let (dir, path) = self.side(place);
-            moved.extend(move_aside_in(dir, path, network, reason, ts)?);
+            if let Some(m) = move_aside_in(dir, path, network, reason, ts)? {
+                moved.push((place, m));
+            }
         }
         Ok(moved)
     }
 
     /// Best effort: the run is already failing, so a failed undo is only logged.
-    fn restore(&self, moved: &[Move]) {
-        for m in moved {
-            let place = if m.from.starts_with(&self.data_path) {
-                Place::Data
-            } else {
-                Place::Cache
-            };
-            let (dir, _) = self.side(place);
+    fn restore(&self, moved: &[(Place, Move)]) {
+        for (place, m) in moved {
+            let (dir, _) = self.side(*place);
             let (Some(original), Some(aside)) = (m.from.file_name(), m.to.file_name()) else {
                 continue;
             };

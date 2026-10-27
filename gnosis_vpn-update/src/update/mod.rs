@@ -527,14 +527,20 @@ async fn drive_engine(
 
     install_result.map_err(|e| (UpdateStage::Install, e))?;
     // The download is cache: nothing reads it after a successful install.
-    let _ = tokio::fs::remove_file(&artifact_path).await;
+    remove_leftover(&artifact_path).await;
     if let Some(path) = &choice_changes_path {
-        let _ = tokio::fs::remove_file(path).await;
+        remove_leftover(path).await;
     }
     Ok(EngineOutcome {
         version: release.version.clone(),
         updater_version,
     })
+}
+
+async fn remove_leftover(path: &std::path::Path) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        tracing::debug!(path = %path.display(), error = %e, "cannot remove install leftover");
+    }
 }
 
 /// Write the choice-changes plist pinning the installed network/loglevel

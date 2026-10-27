@@ -84,6 +84,11 @@ pub fn system_steps() -> Vec<Step> {
     Vec::new()
 }
 
+#[cfg(target_os = "macos")]
+pub fn user_steps() -> Vec<Step> {
+    Vec::new()
+}
+
 /// The app's settings and logs moved from its data dir to XDG config and state.
 #[cfg(target_os = "linux")]
 pub fn user_steps() -> Vec<Step> {
@@ -105,11 +110,6 @@ pub fn user_steps() -> Vec<Step> {
             ],
         },
     ]
-}
-
-#[cfg(target_os = "macos")]
-pub fn user_steps() -> Vec<Step> {
-    Vec::new()
 }
 
 /// Runs the steps below `root`; created parents belong to `account`. Only an unopenable root is an error.
