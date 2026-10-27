@@ -74,13 +74,16 @@ pub fn create_file(dir: &OwnedFd, name: impl AsRef<OsStr>, mode: Mode) -> io::Re
     Ok(File::from(fd))
 }
 
-/// O_NONBLOCK so a planted FIFO cannot hang the open; it is then refused as not a regular file.
+/// O_NONBLOCK so a planted FIFO cannot hang the open; a FIFO or a second hard link (an alias for a root-only file) is then refused.
 pub fn open_regular_file(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<File> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
     let fd = rustix::fs::openat(dir, name.as_ref(), flags, Mode::empty())?;
     let stat = rustix::fs::fstat(&fd)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Err(io::Error::other("not a regular file"));
+    }
+    if stat.st_nlink != 1 {
+        return Err(io::Error::other("has more than one hard link"));
     }
     Ok(File::from(fd))
 }

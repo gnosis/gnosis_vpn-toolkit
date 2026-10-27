@@ -1187,6 +1187,18 @@ mod tests {
     }
 
     #[test]
+    fn a_planted_hard_link_in_the_legacy_dir_is_refused() {
+        let fx = fixture();
+        fx.with_legacy(&["pass"]);
+        let secret = fx._tmp.path().join("secret");
+        fs::write(&secret, "root-only bytes").unwrap();
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        fs::hard_link(&secret, config.join(layout::LEGACY_IDENTITY_FILE)).unwrap();
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Legacy);
+        assert!(entries(&fx.account.home).is_empty());
+    }
+
+    #[test]
     fn a_symlinked_legacy_config_dir_is_refused() {
         let fx = fixture();
         let elsewhere = fx._tmp.path().join("elsewhere");

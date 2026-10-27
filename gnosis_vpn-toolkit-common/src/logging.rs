@@ -44,6 +44,9 @@ fn open_append(path: &Path) -> io::Result<File> {
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Err(io::Error::other("not a regular file"));
     }
+    if stat.st_nlink != 1 {
+        return Err(io::Error::other("has more than one hard link"));
+    }
     Ok(File::from(fd))
 }
 
@@ -74,7 +77,7 @@ mod tests {
     }
 
     #[test]
-    fn open_append_refuses_a_planted_symlink_or_fifo() {
+    fn open_append_refuses_a_planted_symlink_hard_link_or_fifo() {
         let dir = std::env::temp_dir().join(format!("toolkit-logging-planted-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let victim = dir.join("victim");
@@ -82,6 +85,9 @@ mod tests {
         let link = dir.join("link.log");
         std::os::unix::fs::symlink(&victim, &link).unwrap();
         assert!(open_append(&link).is_err());
+        let hard_link = dir.join("hard.log");
+        fs::hard_link(&victim, &hard_link).unwrap();
+        assert!(open_append(&hard_link).is_err());
         assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
 
         let fifo = dir.join("fifo.log");

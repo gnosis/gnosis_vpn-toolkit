@@ -254,11 +254,13 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_symlink_or_fifo_is_reported_unavailable_not_read() {
+    fn a_planted_symlink_hard_link_or_fifo_is_reported_unavailable_not_read() {
         let dir = tempfile::tempdir().unwrap();
         let secret = dir.path().join("secret");
         std::fs::write(&secret, "root-only bytes").unwrap();
         std::os::unix::fs::symlink(&secret, dir.path().join("migrate.log")).unwrap();
+        let hard_link = dir.path().join("linked.log");
+        std::fs::hard_link(&secret, &hard_link).unwrap();
         let fifo = dir.path().join("fifo.log");
         assert!(
             std::process::Command::new("mkfifo")
@@ -268,10 +270,11 @@ mod tests {
                 .success()
         );
         let mut sources = sources(dir.path());
-        sources.extra_logs = vec![fifo];
+        sources.extra_logs = vec![hard_link, fifo];
         let text = decode(&write_bundle(None, &sources).unwrap());
         assert!(!text.contains("root-only bytes"), "{text}");
         assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
+        assert!(text.contains("===== log (linked.log) unavailable: "), "{text}");
         assert!(text.contains("===== log (fifo.log) unavailable: "), "{text}");
     }
 
