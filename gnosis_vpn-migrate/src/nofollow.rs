@@ -91,6 +91,20 @@ pub fn open_regular_file(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<F
     Ok(File::from(fd))
 }
 
+/// For fixed paths under root-owned dirs whose last component a service user may have planted.
+pub fn open_regular_path(path: &Path) -> io::Result<File> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(io::Error::other("not a file path"));
+    };
+    let dir = rustix::fs::openat(
+        CWD,
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    open_regular_file(&dir, name)
+}
+
 pub fn exists(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<bool> {
     match rustix::fs::statat(dir, name.as_ref(), AtFlags::SYMLINK_NOFOLLOW) {
         Ok(_) => Ok(true),

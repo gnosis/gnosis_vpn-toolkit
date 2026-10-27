@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -11,6 +10,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use url::Url;
 use zstd::stream::Encoder;
+
+use crate::nofollow;
 
 pub const DEFAULT_API_URL: &str = "https://log-uploader.gnosisvpn.com/api/upload";
 pub const API_URL_ENV: &str = "GNOSISVPN_LOG_UPLOAD_API_URL";
@@ -74,10 +75,10 @@ pub fn write_bundle(description: Option<&str>, sources: &BundleSources) -> Resul
     encoder.finish().map_err(|e| format!("cannot finish compression: {e}"))
 }
 
-// Bundles get shared with support, so the header names the file, not its absolute path.
+// Headers name the file, not its path, as bundles go to support; the Linux copy is service-owned, so no symlinks or FIFOs.
 fn write_section<W: Write>(encoder: &mut Encoder<'_, W>, title: &str, path: &Path) -> Result<(), String> {
     let source = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-    let file = match File::open(path) {
+    let file = match nofollow::open_regular_path(path) {
         Ok(file) => file,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "log source unreadable");
@@ -263,6 +264,32 @@ mod tests {
         assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
         assert!(
             text.contains("===== migrate log copy (migrate.log) =====\nERROR copied\n\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_planted_symlink_or_fifo_is_reported_unavailable_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("secret");
+        std::fs::write(&secret, "root-only bytes").unwrap();
+        std::os::unix::fs::symlink(&secret, dir.path().join("migrate.log")).unwrap();
+        let fifo = dir.path().join("fifo.log");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR,
+            0,
+        )
+        .unwrap();
+        let mut sources = sources(dir.path());
+        sources.migrate_log_copy = Some(fifo);
+        let text = decode(&write_bundle(None, &sources).unwrap());
+        assert!(!text.contains("root-only bytes"), "{text}");
+        assert!(text.contains("===== migrate log (migrate.log) unavailable: "), "{text}");
+        assert!(
+            text.contains("===== migrate log copy (fifo.log) unavailable: "),
             "{text}"
         );
     }
