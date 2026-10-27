@@ -188,7 +188,7 @@ impl fmt::Display for Outcome {
             Outcome::AlreadyMigrated { network, user, legacy } if legacy.is_empty() => {
                 write!(
                     f,
-                    "Identity already migrated for user {user} on network {network}; nothing to do"
+                    "Identity already migrated for user {user} on network {network}; a run moves the legacy files aside"
                 )
             }
             Outcome::AlreadyMigrated { network, user, legacy } => {
