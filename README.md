@@ -172,10 +172,12 @@ service stopped" and "new service started" on an upgrade from a single-user
 install. It moves the one legacy identity (`/var/lib/gnosisvpn/.config/` on
 Linux, `/Library/Application Support/GnosisVPN/.config/` on macOS, plus the
 Curvy PIX db next to it) into the installing user's per-network layout, so the
-upgraded install keeps its node address. It never deletes anything: the legacy
-files are renamed aside, every destination is written to a staging dir and
-verified (sha256) before it is renamed into place, and a half-written
-`networks/<network>/` never exists.
+upgraded install keeps its node address. `identity` and `start-clean` never
+delete anything: the legacy files are renamed aside, and every destination is
+written to a staging dir and verified (sha256) before it is renamed into place,
+so no `networks/<network>/` dir is ever half-written. Data and cache are renamed
+one after the other; a crash between the two leaves the data dir without its
+cache, which the next run reports as a `Conflict` (resolve with `--replace`).
 
 The network is the installer's choice, read offline from the
 `/etc/gnosisvpn/config.toml` symlink target (`config-<network>.toml` on Linux,
@@ -205,7 +207,9 @@ sudo gnosis_vpn-migrate start-clean [--user <user>]
 
 # Move files the previous release kept elsewhere into their current locations
 # (macOS: installer choice files, updates.log) and, with --user, that user's
-# app settings and logs (Linux); idempotent, run by every postinstall
+# app settings and logs (Linux); idempotent, run by every postinstall. Unlike
+# the other commands it deletes: an old copy whose new location already exists,
+# and the old updates download dir (macOS)
 sudo gnosis_vpn-migrate layout [--user <user>] [--legacy-home <dir>]
 
 # Bundle the migration log (plus installer/updater logs where present),
