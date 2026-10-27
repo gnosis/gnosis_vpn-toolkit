@@ -229,8 +229,8 @@ worker as uid 0.
 
 - **stdout**: with `--output json`, one line `{"outcome": {"type": …, …}}`
   where `type` is one of `Migrated`, `WouldMigrate`, `AlreadyMigrated`,
-  `NothingToMigrate`, `Conflict`, `StartedClean`, `NothingToDo`, `Uploaded`,
-  `Failed` (the last carries `stage` and `error`). Plain mode prints the same
+  `NothingToMigrate`, `Conflict`, `StartedClean`, `Relocated`, `NothingToDo`,
+  `Uploaded`, `Failed` (the last carries `stage` as `{"type": …}` and `error`). Plain mode prints the same
   outcome in one or more human-readable lines. `version` prints
   `{"version": …, "package_version": …}` like the updater.
 - **stderr**: logs (`RUST_LOG`, default `info`), teed into

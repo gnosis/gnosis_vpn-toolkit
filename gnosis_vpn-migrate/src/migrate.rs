@@ -17,6 +17,7 @@ use crate::user::{self, Account};
 
 /// Where a run failed; each stage has one exit code, which is what the installer scripts key on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
 pub enum Stage {
     Privileges,
     User,
@@ -1397,7 +1398,7 @@ mod tests {
         let failed = Outcome::from_failure(Failure::new(Stage::Network, "bad link"));
         let json = serde_json::to_value(MigrateResult { outcome: &failed }).unwrap();
         assert_eq!(json["outcome"]["type"], "Failed");
-        assert_eq!(json["outcome"]["stage"], "Network");
+        assert_eq!(json["outcome"]["stage"]["type"], "Network");
         assert_eq!(json["outcome"]["error"], "bad link");
         let conflict = Outcome::Conflict {
             network: NETWORK.into(),

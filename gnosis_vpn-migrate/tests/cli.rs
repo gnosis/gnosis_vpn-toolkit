@@ -63,5 +63,5 @@ fn privileged_commands_refuse_without_root_and_print_the_paths_forward() {
     assert_eq!(out.status.code(), Some(77));
     let line: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(line["outcome"]["type"], "Failed");
-    assert_eq!(line["outcome"]["stage"], "Privileges");
+    assert_eq!(line["outcome"]["stage"]["type"], "Privileges");
 }
