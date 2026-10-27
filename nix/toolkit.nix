@@ -1,11 +1,6 @@
 # toolkit.nix - gnosis_vpn-toolkit workspace package definitions
 #
-# Package definitions using HOPR nix-lib build tools (nixLib.mkRustPackage) for
-# consistent, reproducible builds across platforms. Adapted from
-# gnosis_vpn-client's nix/gnosisvpn.nix. The repo is a virtual Cargo workspace:
-# the native `binary-<name>` packages select one binary with `--bin`, the
-# per-target `binary-toolkit-<arch>` release packages build every binary with
-# `--bins` (crane installs each one, so one package ships the whole toolkit).
+# Adapted from gnosis_vpn-client's nix/gnosisvpn.nix; `binary-<name>` builds one `--bin`, `binary-toolkit-<arch>` all `--bins`.
 # Notes vs the client:
 #   * no libmnl / libnftnl / sqlite (no killswitch / routing / db) — reqwest's
 #     openssl + cacert come from nix-lib's defaults, so no extra build inputs.
@@ -194,8 +189,7 @@ in
     }
   );
 
-  # Cross-compiled — x86_64 Linux. The `binary-toolkit-*` packages are what CI
-  # publishes: every binary of the workspace in one `result/bin/`.
+  # Cross-compiled — x86_64 Linux; CI publishes the `binary-toolkit-*` packages.
   binary-toolkit-x86_64-linux = withX86_64LinuxStaticEnv (
     builders.x86_64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;

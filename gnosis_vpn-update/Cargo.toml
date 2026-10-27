@@ -1,5 +1,4 @@
-# gnosis_vpn-update — the self-updater: a lib with the logic (unit-testable, a
-# target for nix-lib's `--lib` deps build) and a thin src/main.rs.
+# gnosis_vpn-update — the self-updater; logic in the lib so it is unit-testable and nix-lib's `--lib` build has a target.
 [package]
 edition = { workspace = true }
 license = { workspace = true }

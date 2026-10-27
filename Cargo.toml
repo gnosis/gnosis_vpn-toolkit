@@ -1,10 +1,4 @@
-# Virtual Cargo workspace for the gnosis_vpn-toolkit — a collection of
-# independent companion binaries for the Gnosis VPN client. Each binary is its
-# own member crate under a `gnosis_vpn-*` directory (`gnosis_vpn-update`, the
-# self-updater; `gnosis_vpn-migrate`, the identity migration), with the helpers
-# they share in `gnosis_vpn-toolkit-common`. Shared build/CI scaffolding
-# (Nix/nix-lib, deny.toml, taplo, etc.) lives at this root, mirroring the
-# sibling gnosis_vpn-client workspace.
+# Companion binaries for the Gnosis VPN client, one `gnosis_vpn-*` crate each; build/CI scaffolding mirrors gnosis_vpn-client.
 [workspace]
 members  = ["gnosis_vpn*"]
 resolver = "2"
@@ -14,10 +8,7 @@ edition = "2024"
 license = "LGPL-3.0"
 version = "0.5.0"
 
-# nix-lib/crane derives the umbrella pname from this (the workspace is virtual,
-# so there is no root [package] to read). No member is named exactly
-# `gnosis_vpn-toolkit`; the Nix outputs select their target with `--bin` (one
-# binary) or `--bins` (the release package) and `prependPackageName = false`.
+# Virtual workspace has no root [package] for crane's pname; outputs pick targets via `--bin`/`--bins`.
 [workspace.metadata.crane]
 name = "gnosis_vpn-toolkit"
 

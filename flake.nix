@@ -45,9 +45,7 @@
       imports = [
         inputs.nix-lib.flakeModules.default
       ];
-      # Both binaries build on all three systems; the updater's install engine
-      # is macOS-only and refuses with the apt instructions elsewhere. Each
-      # system exposes the packages it can actually produce (see `packages`).
+      # Every binary builds everywhere; each system exposes only the packages it can produce.
       systems = [
         "aarch64-darwin"
         "x86_64-linux"
@@ -130,10 +128,7 @@
 
           apps.audit = nixLib.mkAuditApp { rustToolchainFile = ./rust-toolchain.toml; };
 
-          # Native single-binary builds everywhere; the release packages
-          # (`binary-toolkit-<arch>`, every binary) are per-target, and each
-          # system only exposes the ones it can build (the musl cross pkg-sets
-          # are a Linux affair, the darwin ones need a darwin host).
+          # musl cross builds need a Linux host and darwin builds a darwin host.
           packages = {
             inherit (toolkitPackages)
               binary-gnosis_vpn-migrate
