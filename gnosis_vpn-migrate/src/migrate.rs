@@ -335,15 +335,8 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
 pub fn start_clean(legacy_home: &Path, user_dirs: Option<(&Account, &str)>) -> Result<Outcome, Failure> {
     let ts = timestamp();
     let mut moved = Vec::new();
-    let config_dir = legacy_home.join(layout::LEGACY_CONFIG_DIR);
-    if config_dir.exists() {
-        let aside = unique_aside(config_dir.with_file_name(format!("{}.{ts}.bak", layout::LEGACY_CONFIG_DIR)));
-        fs::rename(&config_dir, &aside).map_err(|e| Failure::new(Stage::Legacy, with_path(&config_dir, &e)))?;
-        tracing::info!(from = %config_dir.display(), to = %aside.display(), "legacy identity moved aside");
-        moved.push(Move {
-            from: config_dir,
-            to: aside,
-        });
+    if let Some(config_move) = move_legacy_config_aside(legacy_home, &ts)? {
+        moved.push(config_move);
     }
     if let Some((account, network)) = user_dirs {
         moved.extend(move_user_dirs_aside(account, network, &ts)?);
@@ -352,6 +345,26 @@ pub fn start_clean(legacy_home: &Path, user_dirs: Option<(&Account, &str)>) -> R
         return Ok(Outcome::NothingToDo);
     }
     Ok(Outcome::StartedClean { moved })
+}
+
+/// Same lock-down as a migration (GNO-1006): the `.bak` keeps the old key and password.
+fn move_legacy_config_aside(legacy_home: &Path, ts: &str) -> Result<Option<Move>, Failure> {
+    let home = match nofollow::open_home(legacy_home) {
+        Ok(home) => home,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(legacy_failure(legacy_home, &e)),
+    };
+    let config_dir = legacy_home.join(layout::LEGACY_CONFIG_DIR);
+    let Some(config) =
+        nofollow::find_dir(&home, layout::LEGACY_CONFIG_DIR.as_ref()).map_err(|e| legacy_failure(&config_dir, &e))?
+    else {
+        return Ok(None);
+    };
+    let aside = format!("{}.{ts}.bak", layout::LEGACY_CONFIG_DIR);
+    let config_move = rename_aside(&home, legacy_home, layout::LEGACY_CONFIG_DIR, aside)?;
+    lock_down(&config).map_err(|e| legacy_failure(&config_move.to, &e))?;
+    nofollow::sync(&home).map_err(|e| legacy_failure(legacy_home, &e))?;
+    Ok(Some(config_move))
 }
 
 /// Only opens existing dirs: a reset must not create the per-user tree.
@@ -783,18 +796,6 @@ fn timestamp() -> String {
 }
 
 /// Two runs within one second must not rename onto each other.
-fn unique_aside(candidate: PathBuf) -> PathBuf {
-    if !candidate.exists() {
-        return candidate;
-    }
-    let base = candidate.to_string_lossy().into_owned();
-    (1..)
-        .map(|n| PathBuf::from(format!("{base}.{n}")))
-        .find(|p| !p.exists())
-        .unwrap_or(candidate)
-}
-
-/// `unique_aside` for an entry of a held dir.
 fn unique_name(dir: &OwnedFd, candidate: String) -> io::Result<String> {
     if !nofollow::exists(dir, &candidate)? {
         return Ok(candidate);
@@ -1222,6 +1223,19 @@ mod tests {
     }
 
     #[test]
+    fn the_start_clean_backup_is_locked_to_0700() {
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o775)).unwrap();
+        let Outcome::StartedClean { moved } = start_clean(&fx.legacy, None).unwrap() else {
+            panic!("expected StartedClean");
+        };
+        assert_eq!(mode(&moved[0].to), layout::DIR_MODE);
+        assert_eq!(fs::metadata(&moved[0].to).unwrap().uid(), uzers::get_effective_uid());
+    }
+
+    #[test]
     fn start_clean_without_a_user_only_touches_the_legacy_dir() {
         let fx = fixture();
         fx.with_legacy(&["id"]);
@@ -1401,10 +1415,10 @@ mod tests {
     #[test]
     fn aside_names_never_collide() {
         let tmp = tempfile::tempdir().unwrap();
-        let taken = tmp.path().join("x.bak");
-        fs::create_dir(&taken).unwrap();
-        assert_eq!(unique_aside(taken.clone()), tmp.path().join("x.bak.1"));
+        let dir = nofollow::open_home(tmp.path()).unwrap();
+        fs::create_dir(tmp.path().join("x.bak")).unwrap();
+        assert_eq!(unique_name(&dir, "x.bak".into()).unwrap(), "x.bak.1");
         fs::create_dir(tmp.path().join("x.bak.1")).unwrap();
-        assert_eq!(unique_aside(taken), tmp.path().join("x.bak.2"));
+        assert_eq!(unique_name(&dir, "x.bak".into()).unwrap(), "x.bak.2");
     }
 }
