@@ -545,8 +545,7 @@ fn lock_down(dir: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
-/// The installer deletes the service account and a later one may reuse its uid (GNO-960), so root takes what it owned.
-/// Best effort: a rerun finds nothing to migrate and never sweeps again, so one bad entry must not stop the rest.
+/// A later account may reuse the deleted service uid (GNO-960); best effort, since a rerun never sweeps again.
 fn secure_leftovers(home: &OwnedFd, home_path: &Path, legacy_uid: u32) -> Vec<PathBuf> {
     let names = match nofollow::entries(home) {
         Ok(names) => names,
