@@ -629,12 +629,18 @@ impl Networks {
         }
     }
 
+    /// All or nothing: a failed cache move puts the data dir back, so the identity is never left half aside.
     fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<(Place, Move)>, Failure> {
         let mut moved = Vec::new();
         for place in [Place::Data, Place::Cache] {
             let (dir, path) = self.side(place);
-            if let Some(m) = move_aside_in(dir, path, network, reason, ts)? {
-                moved.push((place, m));
+            match move_aside_in(dir, path, network, reason, ts) {
+                Ok(Some(m)) => moved.push((place, m)),
+                Ok(None) => {}
+                Err(e) => {
+                    self.restore(&moved);
+                    return Err(e);
+                }
             }
         }
         Ok(moved)
@@ -1025,6 +1031,35 @@ mod tests {
         );
         assert!(entries(&cache_networks).is_empty());
         assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
+    }
+
+    #[test]
+    fn a_failed_cache_move_aside_puts_the_data_dir_back() {
+        // Root ignores the read-only dir this test relies on.
+        if user::is_root() {
+            return;
+        }
+        let fx = fixture();
+        fx.with_legacy(&["id", "pass", "safe"]);
+        let target = fx.target();
+        fs::create_dir_all(&target.data).unwrap();
+        fs::create_dir_all(&target.cache).unwrap();
+        fs::write(target.data.join(layout::IDENTITY_FILE), "fresh id").unwrap();
+        let cache_networks = fx.layout().cache.join(layout::NETWORKS_DIR);
+        fs::set_permissions(&cache_networks, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = fx.run(false, true);
+        fs::set_permissions(&cache_networks, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.unwrap_err().stage, Stage::Destination);
+        assert_eq!(
+            entries(&fx.layout().data.join(layout::NETWORKS_DIR)),
+            vec![NETWORK.to_string()]
+        );
+        assert_eq!(
+            fs::read_to_string(target.data.join(layout::IDENTITY_FILE)).unwrap(),
+            "fresh id"
+        );
+        assert_eq!(entries(&cache_networks), vec![NETWORK.to_string()]);
     }
 
     #[test]
