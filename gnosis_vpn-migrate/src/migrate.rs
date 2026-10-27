@@ -2,7 +2,7 @@
 //! Root writes into the user's home only through `nofollow`, so a symlink the user plants cannot redirect them.
 
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::os::fd::OwnedFd;
 use std::path::{Path, PathBuf};
@@ -550,17 +550,25 @@ fn legacy_failure(path: &Path, e: &io::Error) -> Failure {
     Failure::new(Stage::Legacy, with_path(path, e))
 }
 
-/// The per-network dir pair as absolute paths, for reporting and the read-only comparison.
+/// The per-network dir pair, absolute for reporting and home-relative for the read-only comparison.
 struct Target {
+    home: PathBuf,
+    data_rel: PathBuf,
+    cache_rel: PathBuf,
     data: PathBuf,
     cache: PathBuf,
 }
 
 impl Target {
     fn new(home: &Path, layout: &UserLayout, network: &str) -> Self {
+        let data_rel = layout::network_dir(&layout.data, network);
+        let cache_rel = layout::network_dir(&layout.cache, network);
         Self {
-            data: home.join(layout::network_dir(&layout.data, network)),
-            cache: home.join(layout::network_dir(&layout.cache, network)),
+            home: home.to_path_buf(),
+            data: home.join(&data_rel),
+            cache: home.join(&cache_rel),
+            data_rel,
+            cache_rel,
         }
     }
 
@@ -575,23 +583,20 @@ impl Target {
         }
     }
 
-    /// A symlink in place of a target file counts as missing, so root never hashes a file the user points at.
     fn compare(&self, plan: &[Planned]) -> Result<Vec<Mismatch>, Failure> {
+        let home = nofollow::open_home(&self.home).map_err(destination(&self.home))?;
         let mut mismatches = Vec::new();
         for planned in plan {
             let target = self.path(planned);
-            let is_file = fs::symlink_metadata(&target).is_ok_and(|m| m.is_file());
-            if !is_file {
+            let Some(file) = self.open(&home, planned, &target) else {
                 mismatches.push(Mismatch {
                     legacy: planned.from.clone(),
                     target,
                     difference: Difference::Missing,
                 });
                 continue;
-            }
-            let hash = nofollow::open_file(&target)
-                .and_then(sha256)
-                .map_err(|e| Failure::new(Stage::Destination, with_path(&target, &e)))?;
+            };
+            let hash = sha256(file).map_err(|e| Failure::new(Stage::Destination, with_path(&target, &e)))?;
             if hash != planned.sha256 {
                 mismatches.push(Mismatch {
                     legacy: planned.from.clone(),
@@ -601,6 +606,35 @@ impl Target {
             }
         }
         Ok(mismatches)
+    }
+
+    /// A symlink or FIFO anywhere below the home reads as missing, so root never hashes a file the user points at.
+    fn open(&self, home: &OwnedFd, planned: &Planned, target: &Path) -> Option<File> {
+        let base = match planned.place {
+            Place::Data => &self.data_rel,
+            Place::Cache => &self.cache_rel,
+        };
+        let rel = base.join(&planned.rel);
+        let (parent, name) = (rel.parent()?, rel.file_name()?);
+        let unusable = |e: io::Error| {
+            tracing::warn!(target = %target.display(), error = %e, "destination file unusable, treated as missing");
+        };
+        let dir = match nofollow::find_dir(home, parent) {
+            Ok(Some(dir)) => dir,
+            Ok(None) => return None,
+            Err(e) => {
+                unusable(e);
+                return None;
+            }
+        };
+        match nofollow::open_regular_file(&dir, name) {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => {
+                unusable(e);
+                None
+            }
+        }
     }
 }
 
@@ -830,6 +864,7 @@ fn unique_name(dir: &OwnedFd, candidate: String) -> io::Result<String> {
 mod tests {
     use super::*;
     use rustix::fs::Mode;
+    use std::fs;
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     const NETWORK: &str = "jura";
@@ -1188,6 +1223,36 @@ mod tests {
         assert!(!config.exists());
         assert!(!fx.legacy.join(layout::PIX_DB_FILE).exists());
         assert_eq!(mode(&legacy[0].to), layout::DIR_MODE);
+    }
+
+    #[test]
+    fn a_symlinked_network_dir_is_never_hashed_through() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        let elsewhere = fx._tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join(layout::IDENTITY_FILE), "legacy id bytes").unwrap();
+        let target = fx.target();
+        fs::create_dir_all(target.data.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &target.data).unwrap();
+        let Outcome::Conflict { mismatches, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected Conflict");
+        };
+        assert_eq!(mismatches[0].difference, Difference::Missing);
+    }
+
+    #[test]
+    fn a_fifo_in_the_destination_reads_as_missing_without_hanging() {
+        let fx = fixture();
+        fx.with_legacy(&["id"]);
+        let target = fx.target();
+        fs::create_dir_all(&target.data).unwrap();
+        let fifo = target.data.join(layout::IDENTITY_FILE);
+        rustix::fs::mknodat(rustix::fs::CWD, &fifo, rustix::fs::FileType::Fifo, Mode::RUSR, 0).unwrap();
+        let Outcome::Conflict { mismatches, .. } = fx.run(false, false).unwrap() else {
+            panic!("expected Conflict");
+        };
+        assert_eq!(mismatches[0].difference, Difference::Missing);
     }
 
     #[test]
