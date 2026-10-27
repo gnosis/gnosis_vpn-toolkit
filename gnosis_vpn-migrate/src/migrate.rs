@@ -261,12 +261,12 @@ pub struct IdentityRequest<'a> {
     pub toolkit_version: &'a str,
 }
 
-pub fn legacy_identity_exists(legacy_home: &Path) -> bool {
-    Legacy::find(legacy_home).is_some()
+pub fn legacy_identity_exists(legacy_home: &Path) -> Result<bool, Failure> {
+    Ok(Legacy::find(legacy_home)?.is_some())
 }
 
 pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
-    let Some(legacy) = Legacy::find(req.legacy_home) else {
+    let Some(legacy) = Legacy::find(req.legacy_home)? else {
         tracing::info!(legacy_home = %req.legacy_home.display(), "no legacy identity found");
         return Ok(Outcome::NothingToMigrate {
             legacy_home: req.legacy_home.to_path_buf(),
@@ -378,57 +378,110 @@ enum Place {
 
 struct Planned {
     from: PathBuf,
+    source: File,
     place: Place,
     rel: PathBuf,
     sha256: [u8; 32],
 }
 
-/// The legacy files: `.config/gnosisvpn-hopr.{id,pass,safe}` and the Curvy PIX db.
+struct Source {
+    from: PathBuf,
+    in_config: bool,
+    name: &'static str,
+    place: Place,
+    rel: PathBuf,
+}
+
+/// `.config/gnosisvpn-hopr.{id,pass,safe}` and the PIX db; the home is service-owned, so root reads only through no-follow handles.
 struct Legacy {
+    home: OwnedFd,
+    home_path: PathBuf,
+    config: OwnedFd,
     config_dir: PathBuf,
-    redb: Option<PathBuf>,
-    sources: Vec<(PathBuf, Place, PathBuf)>,
+    has_redb: bool,
+    sources: Vec<Source>,
 }
 
 impl Legacy {
-    fn find(home: &Path) -> Option<Self> {
-        let config_dir = home.join(layout::LEGACY_CONFIG_DIR);
-        let id = config_dir.join(layout::LEGACY_IDENTITY_FILE);
-        if !id.is_file() {
-            return None;
+    fn find(home_path: &Path) -> Result<Option<Self>, Failure> {
+        let config_dir = home_path.join(layout::LEGACY_CONFIG_DIR);
+        let home = match nofollow::open_home(home_path) {
+            Ok(home) => home,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(legacy_failure(home_path, &e)),
+        };
+        let Some(config) = nofollow::find_dir(&home, layout::LEGACY_CONFIG_DIR.as_ref())
+            .map_err(|e| legacy_failure(&config_dir, &e))?
+        else {
+            return Ok(None);
+        };
+        let config_has =
+            |name: &str| nofollow::exists(&config, name).map_err(|e| legacy_failure(&config_dir.join(name), &e));
+        if !config_has(layout::LEGACY_IDENTITY_FILE)? {
+            return Ok(None);
         }
-        let present = |path: PathBuf| path.is_file().then_some(path);
-        let mut sources = vec![(id, Place::Data, PathBuf::from(layout::IDENTITY_FILE))];
-        if let Some(pass) = present(config_dir.join(layout::LEGACY_PASSWORD_FILE)) {
-            sources.push((pass, Place::Data, PathBuf::from(layout::PASSWORD_FILE)));
+        let source = |in_config: bool, name: &'static str, place: Place, rel: PathBuf| Source {
+            from: if in_config {
+                config_dir.join(name)
+            } else {
+                home_path.join(name)
+            },
+            in_config,
+            name,
+            place,
+            rel,
+        };
+        let mut sources = vec![source(
+            true,
+            layout::LEGACY_IDENTITY_FILE,
+            Place::Data,
+            PathBuf::from(layout::IDENTITY_FILE),
+        )];
+        if config_has(layout::LEGACY_PASSWORD_FILE)? {
+            sources.push(source(
+                true,
+                layout::LEGACY_PASSWORD_FILE,
+                Place::Data,
+                PathBuf::from(layout::PASSWORD_FILE),
+            ));
         }
-        if let Some(safe) = present(config_dir.join(layout::LEGACY_SAFE_FILE)) {
-            sources.push((safe, Place::Cache, PathBuf::from(layout::SAFE_FILE)));
+        if config_has(layout::LEGACY_SAFE_FILE)? {
+            sources.push(source(
+                true,
+                layout::LEGACY_SAFE_FILE,
+                Place::Cache,
+                PathBuf::from(layout::SAFE_FILE),
+            ));
         }
-        let redb = present(home.join(layout::PIX_DB_FILE));
-        if let Some(redb) = &redb {
+        let has_redb = nofollow::exists(&home, layout::PIX_DB_FILE)
+            .map_err(|e| legacy_failure(&home_path.join(layout::PIX_DB_FILE), &e))?;
+        if has_redb {
             let rel = Path::new(layout::PIX_DIR).join(layout::PIX_DB_FILE);
-            sources.push((redb.clone(), Place::Data, rel));
+            sources.push(source(false, layout::PIX_DB_FILE, Place::Data, rel));
         }
-        Some(Self {
+        Ok(Some(Self {
+            home,
+            home_path: home_path.to_path_buf(),
+            config,
             config_dir,
-            redb,
+            has_redb,
             sources,
-        })
+        }))
     }
 
     /// Hashing doubles as the readability check, so an unreadable legacy file fails before anything is created.
     fn plan(&self) -> Result<Vec<Planned>, Failure> {
         self.sources
             .iter()
-            .map(|(from, place, rel)| {
-                let sha256 = File::open(from)
-                    .and_then(sha256)
-                    .map_err(|e| Failure::new(Stage::Legacy, with_path(from, &e)))?;
+            .map(|s| {
+                let dir = if s.in_config { &self.config } else { &self.home };
+                let mut source = nofollow::open_regular_file(dir, s.name).map_err(|e| legacy_failure(&s.from, &e))?;
+                let sha256 = sha256(&mut source).map_err(|e| legacy_failure(&s.from, &e))?;
                 Ok(Planned {
-                    from: from.clone(),
-                    place: *place,
-                    rel: rel.clone(),
+                    from: s.from.clone(),
+                    source,
+                    place: s.place,
+                    rel: s.rel.clone(),
                     sha256,
                 })
             })
@@ -437,25 +490,15 @@ impl Legacy {
 
     fn move_aside(&self, ts: &str) -> Result<Vec<Move>, Failure> {
         let mut moved = Vec::new();
-        let config_aside = unique_aside(
-            self.config_dir
-                .with_file_name(format!("{}.migrated-{ts}", layout::LEGACY_CONFIG_DIR)),
-        );
-        // Held across the rename: the legacy home is service-owned, so the aside path could be swapped for a symlink.
-        let config_fd = nofollow::open_dir_path(&self.config_dir)
-            .map_err(|e| Failure::new(Stage::Legacy, with_path(&self.config_dir, &e)))?;
-        let config_move = rename_aside(&self.config_dir, config_aside)?;
-        lock_down(&config_fd).map_err(|e| Failure::new(Stage::Legacy, with_path(&config_move.to, &e)))?;
+        let config_aside = format!("{}.migrated-{ts}", layout::LEGACY_CONFIG_DIR);
+        let config_move = rename_aside(&self.home, &self.home_path, layout::LEGACY_CONFIG_DIR, config_aside)?;
+        lock_down(&self.config).map_err(|e| legacy_failure(&config_move.to, &e))?;
         moved.push(config_move);
-        if let Some(redb) = &self.redb {
-            let aside = unique_aside(redb.with_file_name(format!("{}.migrated-{ts}", layout::PIX_DB_FILE)));
-            moved.push(rename_aside(redb, aside)?);
+        if self.has_redb {
+            let aside = format!("{}.migrated-{ts}", layout::PIX_DB_FILE);
+            moved.push(rename_aside(&self.home, &self.home_path, layout::PIX_DB_FILE, aside)?);
         }
-        if let Some(home) = self.config_dir.parent() {
-            File::open(home)
-                .and_then(|dir| dir.sync_all())
-                .map_err(|e| Failure::new(Stage::Legacy, with_path(home, &e)))?;
-        }
+        nofollow::sync(&self.home).map_err(|e| legacy_failure(&self.home_path, &e))?;
         Ok(moved)
     }
 }
@@ -467,13 +510,18 @@ fn lock_down(dir: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
-fn rename_aside(from: &Path, to: PathBuf) -> Result<Move, Failure> {
-    fs::rename(from, &to).map_err(|e| Failure::new(Stage::Legacy, with_path(from, &e)))?;
+fn rename_aside(home: &OwnedFd, home_path: &Path, name: &str, aside: String) -> Result<Move, Failure> {
+    let from = home_path.join(name);
+    let fail = |e: io::Error| legacy_failure(&from, &e);
+    let aside = unique_name(home, aside).map_err(fail)?;
+    nofollow::rename(home, name, &aside).map_err(fail)?;
+    let to = home_path.join(aside);
     tracing::info!(from = %from.display(), to = %to.display(), "legacy files moved aside");
-    Ok(Move {
-        from: from.to_path_buf(),
-        to,
-    })
+    Ok(Move { from, to })
+}
+
+fn legacy_failure(path: &Path, e: &io::Error) -> Failure {
+    Failure::new(Stage::Legacy, with_path(path, e))
 }
 
 /// The per-network dir pair as absolute paths, for reporting and the read-only comparison.
@@ -655,8 +703,10 @@ fn copy_verified(planned: &Planned, staging: &OwnedFd, staging_path: &Path, acco
         None => staging.try_clone().map_err(&dest)?,
     };
     let file_name = planned.rel.file_name().unwrap_or_default();
-    let mut source =
-        File::open(&planned.from).map_err(|e| Failure::new(Stage::Legacy, with_path(&planned.from, &e)))?;
+    let mut source = &planned.source;
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|e| legacy_failure(&planned.from, &e))?;
     let mut copy = nofollow::create_file(&dir, file_name, layout::FILE_MODE).map_err(&dest)?;
     io::copy(&mut source, &mut copy).map_err(&dest)?;
     user::chown(&copy, account).map_err(&dest)?;
@@ -982,7 +1032,7 @@ mod tests {
     fn a_failed_cache_publish_takes_the_data_dir_back() {
         let fx = fixture();
         fx.with_legacy(&["id", "safe"]);
-        let legacy = Legacy::find(&fx.legacy).unwrap();
+        let legacy = Legacy::find(&fx.legacy).unwrap().unwrap();
         let plan = legacy.plan().unwrap();
         let networks = Networks::create(&fx.account, &layout::user_layout()).unwrap();
         stage(&networks, "staging", &plan, "marker", &fx.account).unwrap();
@@ -1023,6 +1073,33 @@ mod tests {
         assert_eq!(err.stage, Stage::Destination);
         assert_eq!(fs::read_to_string(&victim).unwrap(), "root-owned bytes");
         assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
+    }
+
+    #[test]
+    fn a_planted_symlink_in_the_legacy_dir_is_never_read_through() {
+        let fx = fixture();
+        fx.with_legacy(&["pass"]);
+        let secret = fx._tmp.path().join("secret");
+        fs::write(&secret, "root-only bytes").unwrap();
+        let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
+        std::os::unix::fs::symlink(&secret, config.join(layout::LEGACY_IDENTITY_FILE)).unwrap();
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Legacy);
+
+        fs::remove_file(config.join(layout::LEGACY_IDENTITY_FILE)).unwrap();
+        fx.with_legacy(&["id"]);
+        std::os::unix::fs::symlink(&secret, fx.legacy.join(layout::PIX_DB_FILE)).unwrap();
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Legacy);
+        assert!(entries(&fx.account.home).is_empty());
+    }
+
+    #[test]
+    fn a_symlinked_legacy_config_dir_is_refused() {
+        let fx = fixture();
+        let elsewhere = fx._tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join(layout::LEGACY_IDENTITY_FILE), "planted").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, fx.legacy.join(layout::LEGACY_CONFIG_DIR)).unwrap();
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Legacy);
     }
 
     #[test]

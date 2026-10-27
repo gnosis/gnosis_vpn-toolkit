@@ -80,7 +80,7 @@ fn require_root() -> Result<(), Failure> {
 
 /// A fresh install has no legacy identity and may have no config link yet; that is OK, not DATAERR.
 fn run_identity(args: &IdentityArgs) -> Result<Outcome, Failure> {
-    if !migrate::legacy_identity_exists(&args.legacy_home) {
+    if !migrate::legacy_identity_exists(&args.legacy_home)? {
         return Ok(Outcome::NothingToMigrate {
             legacy_home: args.legacy_home.clone(),
         });

@@ -74,15 +74,21 @@ pub fn create_file(dir: &OwnedFd, name: impl AsRef<OsStr>, mode: Mode) -> io::Re
     Ok(File::from(fd))
 }
 
-/// A dir at a path whose last component must not be a symlink.
-pub fn open_dir_path(path: &Path) -> io::Result<OwnedFd> {
-    Ok(rustix::fs::openat(CWD, path, DIR_FLAGS, Mode::empty())?)
-}
-
 /// Read-only open of a path whose last component must not be a symlink.
 pub fn open_file(path: &Path) -> io::Result<File> {
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     Ok(File::from(rustix::fs::openat(CWD, path, flags, Mode::empty())?))
+}
+
+/// O_NONBLOCK so a planted FIFO cannot hang the open; it is then refused as not a regular file.
+pub fn open_regular_file(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<File> {
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = rustix::fs::openat(dir, name.as_ref(), flags, Mode::empty())?;
+    let stat = rustix::fs::fstat(&fd)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err(io::Error::other("not a regular file"));
+    }
+    Ok(File::from(fd))
 }
 
 pub fn exists(dir: &OwnedFd, name: impl AsRef<OsStr>) -> io::Result<bool> {
