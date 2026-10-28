@@ -45,10 +45,7 @@
       imports = [
         inputs.nix-lib.flakeModules.default
       ];
-      # The crate builds on all three: `check-update` and `version` behave the
-      # same everywhere, while `update` has an install engine only on macOS and
-      # refuses with the apt instructions elsewhere. Each system exposes the
-      # binaries it can actually produce (see `packages` below).
+      # Every binary builds everywhere; each system exposes only the packages it can produce.
       systems = [
         "aarch64-darwin"
         "x86_64-linux"
@@ -131,11 +128,11 @@
 
           apps.audit = nixLib.mkAuditApp { rustToolchainFile = ./rust-toolchain.toml; };
 
-          # Native builds everywhere; the release binaries are per-target, and
-          # each system only exposes the ones it can build (the musl cross
-          # pkg-sets are a Linux affair, the darwin pair needs a darwin host).
+          # musl cross builds need a Linux host and darwin builds a darwin host.
           packages = {
             inherit (toolkitPackages)
+              binary-gnosis_vpn-migrate
+              binary-gnosis_vpn-migrate-dev
               binary-gnosis_vpn-update
               binary-gnosis_vpn-update-dev
               ;
@@ -143,6 +140,8 @@
           }
           // lib.optionalAttrs isDarwin {
             inherit (toolkitPackages)
+              binary-toolkit-aarch64-darwin
+              binary-toolkit-aarch64-darwin-dev
               binary-gnosis_vpn-update-aarch64-darwin
               binary-gnosis_vpn-update-aarch64-darwin-dev
               ;
@@ -152,6 +151,10 @@
           }
           // lib.optionalAttrs (!isDarwin) {
             inherit (toolkitPackages)
+              binary-toolkit-x86_64-linux
+              binary-toolkit-x86_64-linux-dev
+              binary-toolkit-aarch64-linux
+              binary-toolkit-aarch64-linux-dev
               binary-gnosis_vpn-update-x86_64-linux
               binary-gnosis_vpn-update-x86_64-linux-dev
               binary-gnosis_vpn-update-aarch64-linux

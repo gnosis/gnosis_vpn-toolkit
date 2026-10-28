@@ -4,7 +4,7 @@
 //! socket IPC. The engine ([`install_engine`]) drives the
 //! download → verify → install pipeline and emits [`UpdateStatus`] on a tokio
 //! mpsc channel; the binary forwards each status to stdout as newline-delimited
-//! JSON (see [`crate::output`]) instead of over a socket.
+//! JSON (see `gnosis_vpn_toolkit_common::output`) instead of over a socket.
 //!
 //! The engine downloads a signed `.pkg`, SHA-256-verifies it, and runs
 //! `installer(8)`. macOS only.
@@ -59,19 +59,8 @@ pub enum GateError {
     AlreadyInstalled { candidate: String },
 }
 
-/// Read the currently-installed client version from the version file the
-/// installer writes (see [`paths::installed_version_path`]). Surrounding
-/// whitespace/newline is trimmed; a missing or empty file is an error — the
-/// updater cannot gate already-installed/downgrade without it.
-pub fn read_installed_version(path: &std::path::Path) -> Result<String, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read installed version from {}: {e}", path.display()))?;
-    let version = raw.trim();
-    if version.is_empty() {
-        return Err(format!("installed version file {} is empty", path.display()));
-    }
-    Ok(version.to_string())
-}
+// Kept at this path for the engine's callers; the reader itself is toolkit-wide.
+pub use gnosis_vpn_toolkit_common::package_version::read_installed_version;
 
 /// Componentwise compare for version-like strings.
 ///
@@ -537,10 +526,21 @@ async fn drive_engine(
     let updater_version = None;
 
     install_result.map_err(|e| (UpdateStage::Install, e))?;
+    // The download is cache: nothing reads it after a successful install.
+    remove_leftover(&artifact_path).await;
+    if let Some(path) = &choice_changes_path {
+        remove_leftover(path).await;
+    }
     Ok(EngineOutcome {
         version: release.version.clone(),
         updater_version,
     })
+}
+
+async fn remove_leftover(path: &std::path::Path) {
+    if let Err(e) = tokio::fs::remove_file(path).await {
+        tracing::debug!(path = %path.display(), error = %e, "cannot remove install leftover");
+    }
 }
 
 /// Write the choice-changes plist pinning the installed network/loglevel
@@ -744,29 +744,9 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
 /// Best-effort free-space probe using `statvfs(3)` on Unix. Returns `None` if
 /// the call fails — callers should treat that as "skip the check" rather than
 /// blocking the install.
-// statvfs field widths differ per platform (on macOS `f_bavail` is u32 and
-// `f_frsize` u64, elsewhere both may already be u64), so one of the two casts
-// below is always "unnecessary" for the current target — keep both for
-// portability and overflow-free multiplication.
-#[allow(clippy::unnecessary_cast)]
 fn free_bytes(path: &std::path::Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::statvfs(c.as_ptr(), &mut buf) };
-        if rc != 0 {
-            return None;
-        }
-        Some(buf.f_bavail as u64 * buf.f_frsize as u64)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        None
-    }
+    let stats = rustix::fs::statvfs(path).ok()?;
+    Some(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
 /// Persisted so a crash mid-install can be recorded. Written on every terminal
@@ -981,21 +961,6 @@ mod tests {
 
     fn json_of(result: &CheckResult) -> serde_json::Value {
         serde_json::to_value(result).expect("serialize CheckResult")
-    }
-
-    #[test]
-    fn read_installed_version_trims_and_rejects_missing_or_empty() {
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("gnosis_vpn-update-test-version-{}.txt", std::process::id()));
-
-        std::fs::write(&path, "0.91.1\n").unwrap();
-        assert_eq!(read_installed_version(&path).unwrap(), "0.91.1");
-
-        std::fs::write(&path, "  \n").unwrap();
-        assert!(read_installed_version(&path).unwrap_err().contains("empty"));
-
-        std::fs::remove_file(&path).unwrap();
-        assert!(read_installed_version(&path).unwrap_err().contains("cannot read"));
     }
 
     #[tokio::test]

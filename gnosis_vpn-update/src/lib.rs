@@ -1,14 +1,7 @@
-//! gnosis_vpn-update library.
-//!
-//! All feature logic lives here so it is unit-testable (and so nix-lib's
-//! `cargo test --lib` check has a target); `src/main.rs` is a thin binary that
-//! parses the CLI and dispatches into these modules. This is the first binary
-//! of the toolkit; future tools are separate `gnosis_vpn-*` member crates.
+//! gnosis_vpn-update library: all feature logic, unit-testable; `src/main.rs` only dispatches into it.
 
 pub mod cli;
-pub mod logging;
 pub mod manifest;
-pub mod output;
 #[cfg(test)]
 mod test_server;
 pub mod update;

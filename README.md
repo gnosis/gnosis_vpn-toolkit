@@ -2,19 +2,32 @@
 
 A collection of companion binaries for the
 [Gnosis VPN client](https://github.com/gnosis/gnosis_vpn-client) that perform
-auxiliary tasks on behalf of `gnosis_vpn-app`, which spawns them as subprocesses
-and reads their **standard output**.
+auxiliary tasks on behalf of `gnosis_vpn-app` or of the client installer, which
+spawn them as subprocesses and read their **standard output** (and, for the
+installer, their exit code).
 
 This is a virtual Cargo workspace: each tool is its own `gnosis_vpn-*` member
-crate. The first is **`gnosis_vpn-update`** — the self-updater — documented
-below. Future tools are added as sibling member crates.
+crate, and what they share (stdout protocol, logging, package version) lives in
+`gnosis_vpn-toolkit-common`. The tools:
 
-Unlike the client, these tools run **no socket server**: they communicate with
-`gnosis_vpn-app` purely over stdout. `gnosis_vpn-update` does open a small
-read-only client connection to the running `gnosis_vpn` daemon socket to check
-whether the VPN is connected before updating (see the `--force` flag to bypass).
+- **`gnosis_vpn-update`** — the self-updater, spawned by `gnosis_vpn-app`
+  ([below](#gnosis_vpn-update)).
+- **`gnosis_vpn-migrate`** — moves the legacy system-wide identity into the
+  installing user's per-network layout, spawned by the installer
+  ([below](#gnosis_vpn-migrate)).
 
-## Output contract
+Future tools are added as sibling member crates. One release ships every tool
+(`binary-toolkit-<arch>` builds them all), so the installer can only bump to a
+toolkit version that carries both artifacts.
+
+Unlike the client, these tools run **no socket server**: they communicate
+purely over stdout. `gnosis_vpn-update` does open a small read-only client
+connection to the running `gnosis_vpn` daemon socket to check whether the VPN
+is connected before updating (see the `--force` flag to bypass).
+
+## gnosis_vpn-update
+
+### Output contract
 
 - **stdout** carries the result of whatever was asked for. Every subcommand
   renders it human-readably by default; `--output json` switches the whole
@@ -72,7 +85,7 @@ whether the VPN is connected before updating (see the `--force` flag to bypass).
   VPN-not-connected, `SOFTWARE` for integrity/verify failures, `UNAVAILABLE`
   otherwise). The structured reason is always in the stdout payload.
 
-## Usage
+### Usage
 
 ```console
 # Check for an update on the installed version's channel (needs the VPN
@@ -104,7 +117,7 @@ Requesting a _different_ channel explicitly is always offered/installed —
 switching channels skips the newer-version gate, which only applies within the
 same channel.
 
-### Where manifests come from
+#### Where manifests come from
 
 The **stable** manifest is read from the ENS/IPFS gateway at
 `https://download.vpn.gnosis.eth.limo/manifests/`, so a production update check
@@ -136,11 +149,11 @@ only; stdout still carries one result.
 Installer choices made at original install time (HOPR network jura/rotsee, log
 level) are preserved across updates: the updater detects the installed
 selection (from the `/etc/gnosisvpn/config.toml` symlink target, falling back
-to the choice files under `/Library/Logs/GnosisVPN/installer/`) and pins it via
+to the choice files under `/Library/Application Support/GnosisVPN/installer/`) and pins it via
 `installer -applyChoiceChangesXML`, so a CLI-driven update never flips a rotsee
 install back to the package default (jura).
 
-## Platform support
+### Platform support
 
 `check-update` and `version` behave identically on macOS and Linux. `update`
 has an install engine only on macOS; on Linux it refuses immediately — before
@@ -152,6 +165,121 @@ sudo apt-get update
 sudo apt-get install -y gnosisvpn
 ```
 
+## gnosis_vpn-migrate
+
+A root-run, non-interactive tool the client installer runs between "old
+service stopped" and "new service started" on an upgrade from a single-user
+install. It moves the one legacy identity (`/var/lib/gnosisvpn/.config/` on
+Linux, `/Library/Application Support/GnosisVPN/.config/` on macOS, plus the
+Curvy PIX db next to it) into the installing user's per-network layout, so the
+upgraded install keeps its node address. `identity` and `start-clean` never
+delete anything: the legacy files are renamed aside, and every destination is
+written to a staging dir and verified (sha256) before it is renamed into place,
+so no `networks/<network>/` dir is ever half-written. Data and cache are renamed
+one after the other; a crash between the two leaves the data dir without its
+cache, which the next run reports as a `Conflict` (resolve with `--replace`).
+
+The network is the installer's choice, read offline from the
+`/etc/gnosisvpn/config.toml` symlink target (`config-<network>.toml` on Linux,
+`<network>.toml` on macOS). The per-user layout (duplicated from the client in
+`gnosis_vpn-migrate/src/layout.rs`, contract in GNO-810):
+
+|       | Linux                                                                   | macOS                                                          |
+| ----- | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| data  | `~/.local/share/gnosisvpn/networks/<network>/hopr.{id,pass}` and `pix/` | `~/Library/Application Support/GnosisVPN/networks/<network>/…` |
+| cache | `~/.cache/gnosisvpn/networks/<network>/hopr.safe`                       | `~/Library/Caches/GnosisVPN/networks/<network>/hopr.safe`      |
+
+Directories are `0700`, files `0600`, everything created is owned by the user.
+After a migration, everything left in the legacy home that the service account
+owns is handed to root, and every `.config*` dir there is locked to root-only
+`0700`, so a later account reusing the uid reads nothing.
+
+### Usage
+
+```console
+gnosis_vpn-migrate [-o json|plain] <command>
+
+# Move the legacy identity into <user>'s layout (what the installer runs)
+sudo gnosis_vpn-migrate identity --user <user> [--dry-run] [--replace]
+                                 [--legacy-home <dir>] [--config-link <path>]
+
+# Move the legacy identity aside and, with --user, that user's
+# networks/<network>/ dirs too, so the next start generates a fresh identity
+sudo gnosis_vpn-migrate start-clean [--user <user>]
+                                    [--legacy-home <dir>] [--config-link <path>]
+
+# Move files the previous release kept elsewhere into their current locations
+# (macOS: installer choice files, updates.log) and, with --user, that user's
+# app settings and logs (Linux); idempotent, run by every postinstall. Unlike
+# the other commands it deletes: an old copy whose new location already exists,
+# and the old updates download dir (macOS)
+sudo gnosis_vpn-migrate layout [--user <user>] [--legacy-home <dir>]
+
+# Bundle the migration log (plus installer/updater logs where present),
+# upload it and print the reference to quote
+sudo gnosis_vpn-migrate upload-log [--description <text>]
+
+# Print this tool's version and the installed package's (no root needed)
+gnosis_vpn-migrate version
+```
+
+`identity` outcomes: `Migrated`, `AlreadyMigrated` (the destination already
+holds byte-identical copies of every legacy file; a legacy dir still in place
+is moved aside as after a migration), `NothingToMigrate` (no
+legacy `gnosisvpn-hopr.id`, e.g. a fresh install or after `--reset-identity`),
+`WouldMigrate` (`--dry-run`), `Conflict` (the user already has a _different_
+identity on that network: re-run with `--replace` to keep the legacy one — the
+current one moves to `networks/<network>.replaced-<ts>/` — or run `start-clean`
+to keep the current one). `--user root` is refused: the client never runs a
+worker as uid 0.
+
+### Output contract
+
+- **stdout**: with `--output json`, one line `{"outcome": {"type": …, …}}`
+  where `type` is one of `Migrated`, `WouldMigrate`, `AlreadyMigrated`,
+  `NothingToMigrate`, `Conflict`, `StartedClean`, `Relocated`, `NothingToDo`,
+  `Uploaded`, `Failed` (the last carries `stage` as `{"type": …}` and `error`). Plain mode prints the same
+  outcome in one or more human-readable lines. `version` prints
+  `{"version": …, "package_version": …}` like the updater.
+- **stderr**: logs (`RUST_LOG`, default `info`), teed into
+  `/var/log/gnosisvpn/migrate.log` (Linux) or
+  `/Library/Logs/GnosisVPN/installer/migrate.log` (macOS) when that file can be
+  opened; otherwise stderr-only with one warning (`version` and the not-root
+  path never need the file). On every non-OK exit two extra stderr lines name
+  the reason, the log file and the ways forward:
+  `gnosis_vpn-migrate upload-log`,
+  `gnosis_vpn-migrate identity --user <user> [--replace]`,
+  `gnosis_vpn-migrate start-clean --user <user>`. A `Conflict` instead names
+  `identity --user <user> --replace` and a plain `start-clean`, which keeps
+  the current identity.
+- **exit codes** are the installer's contract (its scripts are bash without
+  `jq`), so they carry the meaning on their own. This table is
+  `gnosis_vpn-migrate`'s own — note `NOPERM` means "not root" here, unlike the
+  updater's "VPN not connected":
+
+| exit | `exitcode` name | meaning                                                                                                       |
+| ---- | --------------- | ------------------------------------------------------------------------------------------------------------- |
+| 0    | `OK`            | `Migrated`, `AlreadyMigrated`, `NothingToMigrate`, `WouldMigrate`, `StartedClean`, `NothingToDo`, `Uploaded`  |
+| 64   | `USAGE`         | bad arguments, unknown user, `--user root`, home missing or equal to the legacy dir                           |
+| 65   | `DATAERR`       | config link unusable (not a symlink, or its target is not a network name) while there is something to migrate |
+| 66   | `NOINPUT`       | legacy files unreadable or cannot be moved aside                                                              |
+| 70   | `SOFTWARE`      | `upload-log` failed, or anything unexpected                                                                   |
+| 73   | `CANTCREAT`     | destination write, chown or verify failure (staging dirs are removed; a re-run starts over)                   |
+| 75   | `TEMPFAIL`      | `Conflict`                                                                                                    |
+| 77   | `NOPERM`        | not running as root                                                                                           |
+
+### Log upload
+
+`upload-log` reuses `gnosis_vpn-app`'s protocol against the same endpoint
+(`https://log-uploader.gnosisvpn.com/api/upload`, override with
+`GNOSISVPN_LOG_UPLOAD_API_URL` or `--api-url`): one zstd frame of plain text,
+`===== <title> =====` sections (system info with the toolkit and installed
+package versions, the optional description capped at 2000 characters, the
+migrate log, then the macOS installer logs and
+`/Library/Logs/GnosisVPN/updates.log` when present), a multipart POST of the first 4 MiB plus the size, then a PUT of the
+whole bundle to the signed URL. It prints the returned reference to quote when
+reporting the problem.
+
 ## Development
 
 The crate builds on macOS (Apple Silicon) and Linux (x86_64 and aarch64), but
@@ -160,19 +288,24 @@ the install engine is macOS-only — exercise it there. This repo uses Nix. With
 
 ```console
 nix develop            # dev shell with the rust toolchain + tooling
-cargo build            # builds the whole workspace; or: nix build .#binary-gnosis_vpn-update
-cargo test             # runs the workspace test suite
+cargo build            # builds the whole workspace; or: nix build .#binary-gnosis_vpn-update / .#binary-gnosis_vpn-migrate
+cargo test             # runs the workspace test suite (unprivileged; `just test-root` exercises the real chown path)
 nix flake check -L     # clippy + docs + tests + licenses
 nix run .#audit        # cargo-audit against the live RUSTSEC advisory DB
 ```
 
-The release binaries are per target — statically linked against musl on Linux:
+The release packages are per target and carry every binary in `result/bin/` —
+statically linked against musl on Linux. CI builds exactly these, so one run
+publishes `gnosis_vpn-update-<arch>` and `gnosis_vpn-migrate-<arch>` together:
 
 ```console
-nix build .#binary-gnosis_vpn-update-aarch64-darwin   # on a macOS host
-nix build .#binary-gnosis_vpn-update-x86_64-linux     # or: just build-x86_64
-nix build .#binary-gnosis_vpn-update-aarch64-linux    # or: just build-arm64
+nix build .#binary-toolkit-aarch64-darwin   # on a macOS host; or: just build-toolkit-darwin
+nix build .#binary-toolkit-x86_64-linux     # or: just build-toolkit-x86_64
+nix build .#binary-toolkit-aarch64-linux    # or: just build-toolkit-arm64
 ```
+
+Single-binary per-target builds of the updater remain available as
+`binary-gnosis_vpn-update-<arch>` (`just build-x86_64`, `just build-arm64`).
 
 ## License
 
