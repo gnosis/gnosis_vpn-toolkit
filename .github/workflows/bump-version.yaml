@@ -8,12 +8,11 @@ on:
         type: choice
         default: "patch"
         options:
-          - rc
           - patch
           - minor
           - major
       custom_version:
-        description: Explicit version X.Y.Z or X.Y.Z-rc.N (overrides release_type)
+        description: Explicit version X.Y.Z (overrides release_type)
         required: false
         type: string
 concurrency:
@@ -68,33 +67,16 @@ jobs:
           current_version=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -n1 | awk -F\" '{print $2}')
           if [[ -n "${CUSTOM_VERSION}" ]]; then
             new_version="${CUSTOM_VERSION#v}"
-            if ! [[ "${new_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
-              echo "Invalid custom_version '${CUSTOM_VERSION}', expected X.Y.Z or X.Y.Z-rc.N" >&2
+            if ! [[ "${new_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Invalid custom_version '${CUSTOM_VERSION}', expected X.Y.Z" >&2
               exit 1
             fi
           else
-            base_version="${current_version%%-*}"
-            rc_number=""
-            [[ "${current_version}" == *-rc.* ]] && rc_number="${current_version##*-rc.}"
-            IFS=. read -r major minor patch <<< "${base_version}"
-            # patch and rc follow hopr-workflows bump-version, which the release action uses
+            IFS=. read -r major minor patch <<< "${current_version}"
             case "${RELEASE_TYPE}" in
               major) new_version="$((major + 1)).0.0" ;;
               minor) new_version="${major}.$((minor + 1)).0" ;;
-              patch)
-                if [[ -n "${rc_number}" ]]; then
-                  new_version="${base_version}"
-                else
-                  new_version="${major}.${minor}.$((patch + 1))"
-                fi
-                ;;
-              rc)
-                if [[ -n "${rc_number}" ]]; then
-                  new_version="${base_version}-rc.$((rc_number + 1))"
-                else
-                  new_version="${major}.$((minor + 1)).0-rc.1"
-                fi
-                ;;
+              patch) new_version="${major}.${minor}.$((patch + 1))" ;;
               *)
                 echo "Unknown release_type '${RELEASE_TYPE}'" >&2
                 exit 1
