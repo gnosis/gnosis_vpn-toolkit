@@ -6,7 +6,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "LGPL-3.0"
-version = "0.5.0"
+version = "0.6.0"
 
 # Virtual workspace has no root [package] for crane's pname; outputs pick targets via `--bin`/`--bins`.
 [workspace.metadata.crane]
