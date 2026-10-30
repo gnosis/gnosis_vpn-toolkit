@@ -1,10 +1,7 @@
 # toolkit.nix - gnosis_vpn-toolkit workspace package definitions
 #
-# Package definitions using HOPR nix-lib build tools (nixLib.mkRustPackage) for
-# consistent, reproducible builds across platforms. Adapted from
-# gnosis_vpn-client's nix/gnosisvpn.nix. The repo is a virtual Cargo workspace;
-# each binary is selected with a `--bin` flag against the workspace root (the
-# first is `--bin gnosis_vpn-update`). Notes vs the client:
+# Adapted from gnosis_vpn-client's nix/gnosisvpn.nix; `binary-<name>` builds one `--bin`, `binary-toolkit-<arch>` all `--bins`.
+# Notes vs the client:
 #   * no libmnl / libnftnl / sqlite (no killswitch / routing / db) — reqwest's
 #     openssl + cacert come from nix-lib's defaults, so no extra build inputs.
 #   * no shell completions, no system-test derivation.
@@ -140,7 +137,7 @@ let
   # skips the automatic `-p gnosis_vpn-toolkit` that nix-lib would derive from
   # [workspace.metadata.crane].name — it has no matching package in this virtual
   # workspace. Binary derivations select their target via `extraCargoArgs`
-  # (`--bin gnosis_vpn-update`); the checks pass none, so tests/clippy/docs stay
+  # (`--bin <name>` or `--bins`); the checks pass none, so tests/clippy/docs stay
   # workspace-wide (`cargoTestExtraArgs` defaults to `--workspace`). A `--bin`
   # on the checks would restrict `cargo test` and silently skip the lib tests.
   mkToolkitBuildArgs =
@@ -157,7 +154,24 @@ let
     };
 in
 {
-  # Local builds
+  # Local builds, one binary each
+  binary-gnosis_vpn-migrate = builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+    src = sources.main;
+    depsSrc = sources.deps;
+    extraCargoArgs = "--bin gnosis_vpn-migrate";
+  });
+
+  binary-gnosis_vpn-migrate-dev = builders.local.callPackage nixLib.mkRustPackage (
+    (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bin gnosis_vpn-migrate";
+    })
+    // {
+      CARGO_PROFILE = "dev";
+    }
+  );
+
   binary-gnosis_vpn-update = builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
     src = sources.main;
     depsSrc = sources.deps;
@@ -175,7 +189,28 @@ in
     }
   );
 
-  # Cross-compiled — x86_64 Linux
+  # Cross-compiled — x86_64 Linux; CI publishes the `binary-toolkit-*` packages.
+  binary-toolkit-x86_64-linux = withX86_64LinuxStaticEnv (
+    builders.x86_64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bins";
+    })
+  );
+
+  binary-toolkit-x86_64-linux-dev = withX86_64LinuxStaticEnv (
+    builders.x86_64-linux.callPackage nixLib.mkRustPackage (
+      (mkToolkitBuildArgs {
+        src = sources.main;
+        depsSrc = sources.deps;
+        extraCargoArgs = "--bins";
+      })
+      // {
+        CARGO_PROFILE = "dev";
+      }
+    )
+  );
+
   binary-gnosis_vpn-update-x86_64-linux = withX86_64LinuxStaticEnv (
     builders.x86_64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
@@ -198,6 +233,27 @@ in
   );
 
   # Cross-compiled — aarch64 Linux
+  binary-toolkit-aarch64-linux = withAarch64LinuxStaticEnv (
+    builders.aarch64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bins";
+    })
+  );
+
+  binary-toolkit-aarch64-linux-dev = withAarch64LinuxStaticEnv (
+    builders.aarch64-linux.callPackage nixLib.mkRustPackage (
+      (mkToolkitBuildArgs {
+        src = sources.main;
+        depsSrc = sources.deps;
+        extraCargoArgs = "--bins";
+      })
+      // {
+        CARGO_PROFILE = "dev";
+      }
+    )
+  );
+
   binary-gnosis_vpn-update-aarch64-linux = withAarch64LinuxStaticEnv (
     builders.aarch64-linux.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;
@@ -273,6 +329,27 @@ in
   # '_withoutFunctions' missing` on current nixpkgs. The pinned nix-lib commit
   # is the latest on its default branch, so there is no fixed release to bump
   # to yet.
+  binary-toolkit-aarch64-darwin = withDarwinStaticFlags (
+    builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
+      src = sources.main;
+      depsSrc = sources.deps;
+      extraCargoArgs = "--bins";
+    })
+  );
+
+  binary-toolkit-aarch64-darwin-dev = withDarwinStaticFlags (
+    builders.local.callPackage nixLib.mkRustPackage (
+      (mkToolkitBuildArgs {
+        src = sources.main;
+        depsSrc = sources.deps;
+        extraCargoArgs = "--bins";
+      })
+      // {
+        CARGO_PROFILE = "dev";
+      }
+    )
+  );
+
   binary-gnosis_vpn-update-aarch64-darwin = withDarwinStaticFlags (
     builders.local.callPackage nixLib.mkRustPackage (mkToolkitBuildArgs {
       src = sources.main;

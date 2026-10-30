@@ -32,7 +32,7 @@ at install time, and launched into the console user's GUI session.
 The loader must never depend on the updater surviving the install: on an
 app-triggered update the pkg preinstall kills the app that spawned the
 updater, which can take the updater down with it before it signals the
-loader. The loader polls `/Library/Logs/GnosisVPN/installer/update_status`
+loader. The loader polls `/Library/Application Support/GnosisVPN/installer/update_status`
 (written as `updating <updater pid>`) every 0.2 s and quits on the first of:
 
 1. the status file contains `done` (written by `dismiss`);
