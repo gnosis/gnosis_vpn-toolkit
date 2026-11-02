@@ -3,8 +3,11 @@ use std::process;
 
 use clap::Parser;
 
-use gnosis_vpn_migrate::cli::{Cli, Command, IdentityArgs, LayoutArgs, OutputFormat, StartCleanArgs, UploadLogArgs};
+use gnosis_vpn_migrate::cli::{
+    Cli, Command, IdentityArgs, LayoutArgs, OutputFormat, StartCleanArgs, SwitchNetworkArgs, UploadLogArgs,
+};
 use gnosis_vpn_migrate::migrate::{self, Failure, IdentityRequest, MigrateResult, Outcome, Stage};
+use gnosis_vpn_migrate::switch::{self, SwitchRequest};
 use gnosis_vpn_migrate::upload::{self, BundleSources};
 use gnosis_vpn_migrate::user::Account;
 use gnosis_vpn_migrate::{layout, network, relocate, user};
@@ -22,6 +25,7 @@ async fn main() {
     logging::setup(log_file.as_deref());
     tracing::info!(version = VERSION, command = ?cli.command, "gnosis_vpn-migrate start");
     let user_name = command_user(&cli.command);
+    let retry = retry_command(&cli.command);
 
     let outcome = match cli.command {
         Command::Version => {
@@ -30,6 +34,7 @@ async fn main() {
         }
         Command::Identity(args) => require_root().and_then(|()| run_identity(&args)),
         Command::StartClean(args) => require_root().and_then(|()| run_start_clean(&args)),
+        Command::SwitchNetwork(args) => require_root().and_then(|()| run_switch_network(&args)),
         Command::Layout(args) => require_root().and_then(|()| run_layout(&args)),
         Command::UploadLog(args) => match require_root() {
             Ok(()) => run_upload(&args).await,
@@ -45,7 +50,7 @@ async fn main() {
         OutputFormat::Plain => println!("{outcome}"),
     }
     if code != exitcode::OK {
-        print_paths_forward(&outcome, &layout::migrate_log(), user_name.as_deref());
+        print_paths_forward(&outcome, &layout::migrate_log(), user_name.as_deref(), retry.as_deref());
     }
     process::exit(code);
 }
@@ -67,7 +72,15 @@ fn command_user(command: &Command) -> Option<String> {
         Command::Identity(args) => Some(args.user.clone()),
         Command::StartClean(args) => args.user.clone(),
         Command::Layout(args) => args.user.clone(),
-        Command::UploadLog(_) | Command::Version => None,
+        Command::SwitchNetwork(_) | Command::UploadLog(_) | Command::Version => None,
+    }
+}
+
+/// A command whose retry is not one of the identity commands names itself in the ways forward.
+fn retry_command(command: &Command) -> Option<String> {
+    match command {
+        Command::SwitchNetwork(args) => Some(format!("sudo gnosis_vpn-migrate switch-network --from {}", args.from)),
+        _ => None,
     }
 }
 
@@ -86,7 +99,11 @@ fn run_identity(args: &IdentityArgs) -> Result<Outcome, Failure> {
         });
     }
     let account = user::resolve(&args.user, &args.legacy_home).map_err(|e| Failure::new(Stage::User, e))?;
-    let network = network::from_config_link(&args.config_link).map_err(|e| Failure::new(Stage::Network, e))?;
+    let network = match &args.network {
+        Some(name) => network::validate(name),
+        None => network::from_config_link(&args.config_link),
+    }
+    .map_err(|e| Failure::new(Stage::Network, e))?;
     migrate::migrate_identity(&IdentityRequest {
         account: &account,
         network: &network,
@@ -111,6 +128,30 @@ fn run_start_clean(args: &StartCleanArgs) -> Result<Outcome, Failure> {
         }
     };
     migrate::start_clean(&args.legacy_home, Some((&account, &network)))
+}
+
+/// Every local account, so users other than the installing one keep their identity too.
+fn run_switch_network(args: &SwitchNetworkArgs) -> Result<Outcome, Failure> {
+    let from = network::validate(&args.from).map_err(|e| Failure::new(Stage::Network, e))?;
+    let to = network::from_config_link(&args.config_link).map_err(|e| Failure::new(Stage::Network, e))?;
+    if from == to {
+        return Err(Failure::new(
+            Stage::Network,
+            format!(
+                "{} already names {from}; nothing to switch from",
+                args.config_link.display()
+            ),
+        ));
+    }
+    let accounts = user::local_accounts(&layout::home_roots(), &args.legacy_home);
+    tracing::info!(%from, %to, accounts = accounts.len(), "switching network");
+    Ok(Outcome::Switched(switch::switch_network(&SwitchRequest {
+        from: &from,
+        to: &to,
+        legacy_home: &args.legacy_home,
+        accounts: &accounts,
+        toolkit_version: VERSION,
+    })))
 }
 
 /// System files first, then the user's; a failed step is reported in the outcome and never a failure.
@@ -171,12 +212,19 @@ fn print_version(format: OutputFormat) {
 }
 
 /// Two stderr lines the installer prints verbatim: the reason, then the log and the ways forward.
-fn print_paths_forward(outcome: &Outcome, log_file: &Path, user: Option<&str>) {
+fn print_paths_forward(outcome: &Outcome, log_file: &Path, user: Option<&str>, retry: Option<&str>) {
     eprintln!("gnosis_vpn-migrate: {}", outcome.reason());
-    eprintln!("log: {} | next: {}", log_file.display(), next_steps(outcome, user));
+    eprintln!(
+        "log: {} | next: {}",
+        log_file.display(),
+        next_steps(outcome, user, retry)
+    );
 }
 
-fn next_steps(outcome: &Outcome, user: Option<&str>) -> String {
+fn next_steps(outcome: &Outcome, user: Option<&str>, retry: Option<&str>) -> String {
+    if let Some(retry) = retry {
+        return format!("sudo gnosis_vpn-migrate upload-log | {retry}");
+    }
     let user = user.unwrap_or("<user>");
     // On a conflict `--user` would also move the current identity aside, and the next start would generate a third one.
     if matches!(outcome, Outcome::Conflict { .. }) {
@@ -200,12 +248,21 @@ mod tests {
             user: "alice".into(),
             mismatches: vec![],
         };
-        let next = next_steps(&conflict, Some("alice"));
+        let next = next_steps(&conflict, Some("alice"), None);
         assert!(next.contains("identity --user alice --replace"), "{next}");
         assert!(next.contains("start-clean (keep the current one)"), "{next}");
         assert!(!next.contains("start-clean --user"), "{next}");
 
         let failed = Outcome::from_failure(Failure::new(Stage::Destination, "x"));
-        assert!(next_steps(&failed, Some("alice")).contains("start-clean --user alice"));
+        assert!(next_steps(&failed, Some("alice"), None).contains("start-clean --user alice"));
+    }
+
+    #[test]
+    fn a_failed_switch_offers_its_own_retry() {
+        let failed = Outcome::from_failure(Failure::new(Stage::Destination, "x"));
+        let retry = "sudo gnosis_vpn-migrate switch-network --from jura-dev";
+        let next = next_steps(&failed, None, Some(retry));
+        assert!(next.ends_with(retry), "{next}");
+        assert!(!next.contains("identity"), "{next}");
     }
 }

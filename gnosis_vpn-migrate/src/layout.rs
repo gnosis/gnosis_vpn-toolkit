@@ -7,6 +7,8 @@ use rustix::fs::Mode;
 pub const IDENTITY_FILE: &str = "hopr.id";
 pub const PASSWORD_FILE: &str = "hopr.pass";
 pub const SAFE_FILE: &str = "hopr.safe";
+/// A retired network's safe, kept next to its identity once that identity moved to a new network.
+pub const SAFE_BACKUP_FILE: &str = "hopr.safe.bak";
 pub const PIX_DIR: &str = "pix";
 pub const PIX_DB_FILE: &str = "curvy-pix.redb";
 pub const MIGRATED_FROM_FILE: &str = "migrated-from";
@@ -31,6 +33,17 @@ pub fn legacy_home() -> PathBuf {
 #[cfg(target_os = "linux")]
 pub fn legacy_home() -> PathBuf {
     PathBuf::from("/var/lib/gnosisvpn")
+}
+
+/// Where `switch-network` looks for accounts; `/var/home` is the home root of image-based distros.
+#[cfg(target_os = "macos")]
+pub fn home_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("/Users")]
+}
+
+#[cfg(target_os = "linux")]
+pub fn home_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("/home"), PathBuf::from("/var/home")]
 }
 
 /// The installer's network choice: a symlink to `config-<network>.toml` (Linux) or `<network>.toml` (macOS).

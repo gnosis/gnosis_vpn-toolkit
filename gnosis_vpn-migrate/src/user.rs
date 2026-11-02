@@ -4,8 +4,10 @@ use std::io;
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 
-use rustix::fs::{Gid, Uid};
+use rustix::fs::{AtFlags, FileType, Gid, Uid};
 use uzers::os::unix::UserExt;
+
+use crate::nofollow;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -47,6 +49,54 @@ pub fn resolve(name: &str, legacy_home: &Path) -> Result<Account, String> {
         gid: user.primary_group_id(),
         home,
     })
+}
+
+/// Every account whose passwd home is a dir right under one of `roots`, found by the dir's owner; root and the legacy home are left out.
+pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> Vec<Account> {
+    let mut accounts: Vec<Account> = Vec::new();
+    for root in roots {
+        let dir = match nofollow::open_home(root) {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                tracing::warn!(root = %root.display(), error = %e, "cannot open home root");
+                continue;
+            }
+        };
+        let names = match nofollow::entries(&dir) {
+            Ok(names) => names,
+            Err(e) => {
+                tracing::warn!(root = %root.display(), error = %e, "cannot list home dirs");
+                continue;
+            }
+        };
+        for name in names {
+            let Ok(stat) = rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) else {
+                continue;
+            };
+            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || stat.st_uid == 0 {
+                continue;
+            }
+            let Some(user) = uzers::get_user_by_uid(stat.st_uid) else {
+                continue;
+            };
+            let home = root.join(&name);
+            let duplicate = accounts.iter().any(|a| a.uid == user.uid());
+            if user.home_dir() != home || duplicate || same_path(&home, legacy_home) {
+                continue;
+            }
+            let Some(user_name) = user.name().to_str() else {
+                continue;
+            };
+            accounts.push(Account {
+                name: user_name.to_string(),
+                uid: user.uid(),
+                gid: user.primary_group_id(),
+                home,
+            });
+        }
+    }
+    accounts
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -103,5 +153,33 @@ mod tests {
         let name = me.name().to_str().unwrap();
         let err = resolve(name, me.home_dir()).unwrap_err();
         assert!(err.contains("legacy data dir"), "{err}");
+    }
+
+    #[test]
+    fn the_current_user_is_found_under_its_home_root() {
+        let me = uzers::get_user_by_uid(uzers::get_effective_uid()).unwrap();
+        let home = me.home_dir().to_path_buf();
+        let Some(root) = home.parent().filter(|_| !is_root() && home.is_dir()) else {
+            return;
+        };
+        let accounts = local_accounts(&[root.to_path_buf()], Path::new("/var/lib/gnosisvpn"));
+        assert!(
+            accounts.iter().any(|a| a.uid == me.uid() && a.home == home),
+            "{accounts:?}"
+        );
+        let accounts = local_accounts(&[root.to_path_buf()], &home);
+        assert!(
+            !accounts.iter().any(|a| a.uid == me.uid()),
+            "the legacy home is never an account"
+        );
+    }
+
+    #[test]
+    fn dirs_whose_owner_lives_elsewhere_and_links_are_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("someone")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("someone"), tmp.path().join("link")).unwrap();
+        let roots = [tmp.path().to_path_buf(), tmp.path().join("missing")];
+        assert!(local_accounts(&roots, Path::new("/var/lib/gnosisvpn")).is_empty());
     }
 }
