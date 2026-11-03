@@ -162,24 +162,58 @@ fn back_up_safe(
         Err(e) => return Err(fail(e)),
     };
     let sha256 = migrate::sha256(&mut safe).map_err(&fail)?;
-    if let Ok(mut existing) = nofollow::open_regular_file(from_data, layout::SAFE_BACKUP_FILE)
-        && migrate::sha256(&mut existing).is_ok_and(|backed_up| backed_up == sha256)
-    {
+    let Some(name) = free_backup_name(from_data, &layout::safe_backup_file(from), &sha256).map_err(&fail)? else {
         return Ok(None);
-    }
-    let name = migrate::unique_name(from_data, layout::SAFE_BACKUP_FILE.to_string()).map_err(&fail)?;
+    };
+    // Written under a temporary name and renamed once verified, so a failed run leaves no partial backup behind.
+    let staging = migrate::unique_name(from_data, format!(".{name}.partial")).map_err(&fail)?;
     let planned = Planned {
         from: safe_path.clone(),
         source: safe,
         place: Place::Data,
-        rel: PathBuf::from(&name),
+        rel: PathBuf::from(&staging),
         sha256,
     };
-    migrate::copy_verified(&planned, from_data, from_path, account)?;
+    let backup_path = from_path.join(&name);
+    let published = migrate::copy_verified(&planned, from_data, from_path, account).and_then(|()| {
+        nofollow::rename(from_data, &staging, &name)
+            .and_then(|()| nofollow::sync(from_data))
+            .map_err(migrate::destination(&backup_path))
+    });
+    if let Err(e) = published {
+        if let Err(cleanup) = nofollow::remove(from_data, &staging)
+            && cleanup.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %from_path.join(&staging).display(), error = %cleanup, "cannot remove the partial safe backup");
+        }
+        return Err(e);
+    }
     Ok(Some(Move {
         from: safe_path.clone(),
-        to: from_path.join(name),
+        to: backup_path,
     }))
+}
+
+/// The first free name in the `<base>`, `<base>.1`, … series, or `None` when a backup in it already holds these bytes.
+fn free_backup_name(dir: &OwnedFd, base: &str, sha256: &[u8; 32]) -> io::Result<Option<String>> {
+    let mut n = 0;
+    loop {
+        let name = if n == 0 {
+            base.to_string()
+        } else {
+            format!("{base}.{n}")
+        };
+        if !nofollow::exists(dir, &name)? {
+            return Ok(Some(name));
+        }
+        // Anything but a readable regular file is passed over, never followed.
+        if let Ok(mut existing) = nofollow::open_regular_file(dir, &name)
+            && migrate::sha256(&mut existing).is_ok_and(|backed_up| backed_up == *sha256)
+        {
+            return Ok(None);
+        }
+        n += 1;
+    }
 }
 
 /// The id and its password only; a symlink or FIFO is refused, so root never reads a file the user points it at.
@@ -338,15 +372,15 @@ mod tests {
             [
                 layout::IDENTITY_FILE,
                 layout::PASSWORD_FILE,
-                layout::SAFE_BACKUP_FILE,
+                "hopr.safe.jura-staging.bak",
                 layout::PIX_DIR,
             ]
         );
         assert_eq!(
-            fs::read_to_string(old.join(layout::SAFE_BACKUP_FILE)).unwrap(),
+            fs::read_to_string(old.join(layout::safe_backup_file(FROM))).unwrap(),
             "jura safe"
         );
-        assert_eq!(mode(&old.join(layout::SAFE_BACKUP_FILE)), layout::FILE_MODE);
+        assert_eq!(mode(&old.join(layout::safe_backup_file(FROM))), layout::FILE_MODE);
         assert_eq!(
             fs::read_to_string(cache(alice, FROM).join(layout::SAFE_FILE)).unwrap(),
             "jura safe"
@@ -366,8 +400,32 @@ mod tests {
 
         fs::write(cache(alice, FROM).join(layout::SAFE_FILE), "redeployed jura safe").unwrap();
         assert_eq!(fx.run().safe_backups.len(), 1);
-        let backup = data(alice, FROM).join(format!("{}.1", layout::SAFE_BACKUP_FILE));
+        let backup = data(alice, FROM).join(format!("{}.1", layout::safe_backup_file(FROM)));
         assert_eq!(fs::read_to_string(backup).unwrap(), "redeployed jura safe");
+        assert!(fx.run().safe_backups.is_empty(), "a numbered backup counts as done too");
+        assert!(
+            !data(alice, FROM)
+                .join(format!("{}.2", layout::safe_backup_file(FROM)))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_failed_safe_backup_leaves_no_partial_file() {
+        // Root may chown to any uid, so only an unprivileged run fails the copy.
+        if crate::user::is_root() {
+            return;
+        }
+        let mut fx = fixture(&["alice"]);
+        fx.accounts[0].uid += 1;
+        let alice = &fx.accounts[0];
+        on_old_network(alice);
+        let report = fx.run();
+        assert_eq!(report.failed.len(), 1);
+        assert_eq!(
+            names(&data(alice, FROM)),
+            [layout::IDENTITY_FILE, layout::PASSWORD_FILE, layout::PIX_DIR]
+        );
     }
 
     #[test]
@@ -510,7 +568,7 @@ mod tests {
             "legacy jura safe"
         );
         assert_eq!(
-            fs::read_to_string(data(alice, FROM).join(layout::SAFE_BACKUP_FILE)).unwrap(),
+            fs::read_to_string(data(alice, FROM).join(layout::safe_backup_file(FROM))).unwrap(),
             "legacy jura safe"
         );
     }
@@ -534,7 +592,7 @@ mod tests {
             data(alice, TO).join(layout::PASSWORD_FILE),
             data(alice, TO).join(layout::MIGRATED_FROM_FILE),
             cache(alice, TO),
-            data(alice, FROM).join(layout::SAFE_BACKUP_FILE),
+            data(alice, FROM).join(layout::safe_backup_file(FROM)),
         ];
         for path in created {
             let meta = fs::symlink_metadata(&path).unwrap();

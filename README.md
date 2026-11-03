@@ -254,14 +254,16 @@ one the config link names, for every account whose home is a dir under
 - A user who already has `networks/<to>/hopr.id` keeps it. Anything else at
   `networks/<to>` (e.g. an orphaned cached safe) moves to
   `networks/<to>.replaced-<ts>/` first.
-- The old network's `hopr.safe` is copied to `networks/<from>/hopr.safe.bak`
+- The old network's `hopr.safe` is copied to `networks/<from>/hopr.safe.<from>.bak`
   in the data dir, which outlives cache cleaners; the old safe's address is
   what drains its funds. The `<from>` dirs are otherwise left in place, so
   switching back to the old network keeps working.
 
 A legacy `.config/gnosisvpn-hopr.safe` that `identity` has not migrated yet is
 renamed to `gnosisvpn-hopr.safe.<from>.bak`, so a later `identity` carries no
-stale safe. One user's failure never stops the others; the outcome lists it.
+stale safe. One user's failure never stops the others; the outcome lists it, as
+it does a home it could not inspect. A rerun never writes a second backup with
+the same bytes, and a backup is renamed into place only once verified.
 
 ### Output contract
 
@@ -282,7 +284,10 @@ stale safe. One user's failure never stops the others; the outcome lists it.
   `gnosis_vpn-migrate start-clean --user <user>`. A `Conflict` instead names
   `identity --user <user> --replace` and a plain `start-clean`, which keeps
   the current identity; a failed `switch-network` names itself with its
-  `--from`.
+  `--from`. Every suggestion repeats `--network` and any non-default
+  `--legacy-home`/`--config-link`, shell-quoted; after `identity --network` the
+  fresh-start option is a plain `start-clean`, since `--user` would reset the
+  network the config link names instead.
 - **exit codes** are the installer's contract (its scripts are bash without
   `jq`), so they carry the meaning on their own. This table is
   `gnosis_vpn-migrate`'s own — note `NOPERM` means "not root" here, unlike the

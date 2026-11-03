@@ -8,6 +8,7 @@ use rustix::fs::{AtFlags, FileType, Gid, Uid};
 use uzers::os::unix::UserExt;
 
 use crate::nofollow;
+use crate::relocate::Problem;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
@@ -52,27 +53,35 @@ pub fn resolve(name: &str, legacy_home: &Path) -> Result<Account, String> {
 }
 
 /// Every account whose passwd home is a dir right under one of `roots`, found by the dir's owner; root and the legacy home are left out.
-pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> Vec<Account> {
+/// A root or entry that cannot be inspected is returned as a problem: its user would otherwise be skipped silently.
+pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, Vec<Problem>) {
     let mut accounts: Vec<Account> = Vec::new();
+    let mut problems = Vec::new();
     for root in roots {
         let dir = match nofollow::open_home(root) {
             Ok(dir) => dir,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(e) => {
-                tracing::warn!(root = %root.display(), error = %e, "cannot open home root");
+                problems.push(problem(root, format!("cannot open home root: {e}")));
                 continue;
             }
         };
         let names = match nofollow::entries(&dir) {
             Ok(names) => names,
             Err(e) => {
-                tracing::warn!(root = %root.display(), error = %e, "cannot list home dirs");
+                problems.push(problem(root, format!("cannot list home dirs: {e}")));
                 continue;
             }
         };
         for name in names {
-            let Ok(stat) = rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) else {
-                continue;
+            let home = root.join(&name);
+            let stat = match rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(rustix::io::Errno::NOENT) => continue,
+                Err(e) => {
+                    problems.push(problem(&home, format!("cannot inspect: {e}")));
+                    continue;
+                }
             };
             if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || stat.st_uid == 0 {
                 continue;
@@ -80,12 +89,12 @@ pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> Vec<Account> {
             let Some(user) = uzers::get_user_by_uid(stat.st_uid) else {
                 continue;
             };
-            let home = root.join(&name);
             let duplicate = accounts.iter().any(|a| a.uid == user.uid());
             if user.home_dir() != home || duplicate || same_path(&home, legacy_home) {
                 continue;
             }
             let Some(user_name) = user.name().to_str() else {
+                problems.push(problem(&home, "its owner's account name is not UTF-8".to_string()));
                 continue;
             };
             accounts.push(Account {
@@ -96,7 +105,14 @@ pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> Vec<Account> {
             });
         }
     }
-    accounts
+    (accounts, problems)
+}
+
+fn problem(path: &Path, error: String) -> Problem {
+    Problem {
+        path: path.to_path_buf(),
+        error,
+    }
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -162,12 +178,9 @@ mod tests {
         let Some(root) = home.parent().filter(|_| !is_root() && home.is_dir()) else {
             return;
         };
-        let accounts = local_accounts(&[root.to_path_buf()], Path::new("/var/lib/gnosisvpn"));
-        assert!(
-            accounts.iter().any(|a| a.uid == me.uid() && a.home == home),
-            "{accounts:?}"
-        );
-        let accounts = local_accounts(&[root.to_path_buf()], &home);
+        let (accounts, _) = local_accounts(&[root.to_path_buf()], Path::new("/var/lib/gnosisvpn"));
+        assert!(accounts.iter().any(|a| a.uid == me.uid() && a.home == home));
+        let (accounts, _) = local_accounts(&[root.to_path_buf()], &home);
         assert!(
             !accounts.iter().any(|a| a.uid == me.uid()),
             "the legacy home is never an account"
@@ -175,11 +188,30 @@ mod tests {
     }
 
     #[test]
-    fn dirs_whose_owner_lives_elsewhere_and_links_are_skipped() {
+    fn dirs_whose_owner_lives_elsewhere_links_and_missing_roots_are_skipped() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(tmp.path().join("someone")).unwrap();
         std::os::unix::fs::symlink(tmp.path().join("someone"), tmp.path().join("link")).unwrap();
         let roots = [tmp.path().to_path_buf(), tmp.path().join("missing")];
-        assert!(local_accounts(&roots, Path::new("/var/lib/gnosisvpn")).is_empty());
+        let (accounts, problems) = local_accounts(&roots, Path::new("/var/lib/gnosisvpn"));
+        assert!(accounts.is_empty() && problems.is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_home_root_is_a_problem_not_a_silent_skip() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root reads any dir, so only an unprivileged run can see the failure.
+        if is_root() {
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("homes");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (accounts, problems) = local_accounts(std::slice::from_ref(&root), Path::new("/var/lib/gnosisvpn"));
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(accounts.is_empty());
+        assert_eq!(problems.len(), 1);
+        assert_eq!(problems[0].path, root);
     }
 }

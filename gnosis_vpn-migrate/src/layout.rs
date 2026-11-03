@@ -7,8 +7,6 @@ use rustix::fs::Mode;
 pub const IDENTITY_FILE: &str = "hopr.id";
 pub const PASSWORD_FILE: &str = "hopr.pass";
 pub const SAFE_FILE: &str = "hopr.safe";
-/// A retired network's safe, kept next to its identity once that identity moved to a new network.
-pub const SAFE_BACKUP_FILE: &str = "hopr.safe.bak";
 pub const PIX_DIR: &str = "pix";
 pub const PIX_DB_FILE: &str = "curvy-pix.redb";
 pub const MIGRATED_FROM_FILE: &str = "migrated-from";
@@ -126,4 +124,9 @@ pub const NETWORKS_DIR: &str = "networks";
 
 pub fn network_dir(base: &Path, network: &str) -> PathBuf {
     base.join(NETWORKS_DIR).join(network)
+}
+
+/// A replaced network's safe, kept next to its identity once that identity moved on; named like the legacy one.
+pub fn safe_backup_file(network: &str) -> String {
+    format!("{SAFE_FILE}.{network}.bak")
 }
