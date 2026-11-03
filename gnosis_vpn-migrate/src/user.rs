@@ -52,10 +52,11 @@ pub fn resolve(name: &str, legacy_home: &Path) -> Result<Account, String> {
     })
 }
 
-/// Every account whose passwd home is a dir right under one of `roots`, found by the dir's owner; root and the legacy home are left out.
-/// A root or entry that cannot be inspected is returned as a problem: its user would otherwise be skipped silently.
+/// Every non-root account whose passwd home is a dir right under one of `roots`, judged by that home and not by who owns it.
+/// Candidates are the owner and the namesake of each dir there and, on Linux, the local passwd file; the legacy home is left out.
+/// A root, entry or passwd file that cannot be read is returned as a problem: its user would otherwise be skipped silently.
 pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, Vec<Problem>) {
-    let mut accounts: Vec<Account> = Vec::new();
+    let mut candidates = Vec::new();
     let mut problems = Vec::new();
     for root in roots {
         let dir = match nofollow::open_home(root) {
@@ -74,38 +75,72 @@ pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, V
             }
         };
         for name in names {
-            let home = root.join(&name);
-            let stat = match rustix::fs::statat(&dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(stat) => stat,
-                Err(rustix::io::Errno::NOENT) => continue,
+            // Follows a top-level link (`/home/alice -> /mnt/alice` is a valid home); nothing below a home is followed.
+            match rustix::fs::statat(&dir, &name, AtFlags::empty()) {
+                Ok(stat) if FileType::from_raw_mode(stat.st_mode) == FileType::Directory => {
+                    candidates.extend(uzers::get_user_by_uid(stat.st_uid));
+                }
+                Ok(_) | Err(rustix::io::Errno::NOENT) => continue,
                 Err(e) => {
-                    problems.push(problem(&home, format!("cannot inspect: {e}")));
+                    problems.push(problem(&root.join(&name), format!("cannot inspect: {e}")));
                     continue;
                 }
-            };
-            if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || stat.st_uid == 0 {
-                continue;
             }
-            let Some(user) = uzers::get_user_by_uid(stat.st_uid) else {
-                continue;
-            };
-            let duplicate = accounts.iter().any(|a| a.uid == user.uid());
-            if user.home_dir() != home || duplicate || same_path(&home, legacy_home) {
-                continue;
+            // A root-owned home still belongs to the account it is named after.
+            if let Some(name) = name.to_str() {
+                candidates.extend(uzers::get_user_by_name(name));
             }
-            let Some(user_name) = user.name().to_str() else {
-                problems.push(problem(&home, "its owner's account name is not UTF-8".to_string()));
-                continue;
-            };
-            accounts.push(Account {
-                name: user_name.to_string(),
-                uid: user.uid(),
-                gid: user.primary_group_id(),
-                home,
-            });
+        }
+    }
+    #[cfg(target_os = "linux")]
+    match passwd_names(Path::new("/etc/passwd")) {
+        Ok(names) => candidates.extend(names.iter().filter_map(uzers::get_user_by_name)),
+        Err(e) => problems.push(problem(Path::new("/etc/passwd"), format!("cannot read: {e}"))),
+    }
+    let mut accounts: Vec<Account> = Vec::new();
+    for user in candidates {
+        if accounts.iter().any(|a| a.uid == user.uid()) {
+            continue;
+        }
+        match account_under(&user, roots, legacy_home) {
+            Some(Ok(account)) => accounts.push(account),
+            Some(Err(e)) => problems.push(problem(user.home_dir(), e)),
+            None => {}
         }
     }
     (accounts, problems)
+}
+
+/// `Some` when `user` is not root and its passwd home is an existing dir right under one of `roots`, other than the legacy home.
+fn account_under(user: &uzers::User, roots: &[PathBuf], legacy_home: &Path) -> Option<Result<Account, String>> {
+    let home = user.home_dir();
+    let under_root = home
+        .parent()
+        .is_some_and(|parent| roots.iter().any(|root| root.as_path() == parent));
+    if user.uid() == 0 || !under_root || !home.is_dir() || same_path(home, legacy_home) {
+        return None;
+    }
+    let Some(name) = user.name().to_str() else {
+        return Some(Err("account name is not UTF-8".to_string()));
+    };
+    Some(Ok(Account {
+        name: name.to_string(),
+        uid: user.uid(),
+        gid: user.primary_group_id(),
+        home: home.to_path_buf(),
+    }))
+}
+
+/// The account names in a passwd file; comments and blank lines are skipped.
+#[cfg(target_os = "linux")]
+fn passwd_names(path: &Path) -> io::Result<Vec<String>> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split(':').next())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 fn problem(path: &Path, error: String) -> Problem {
@@ -213,5 +248,60 @@ mod tests {
         assert!(accounts.is_empty());
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].path, root);
+    }
+
+    fn user_with_home(uid: u32, name: &str, home: &Path) -> uzers::User {
+        uzers::User::new(uid, name, uid).with_home_dir(home)
+    }
+
+    #[test]
+    fn an_account_counts_by_its_passwd_home_whoever_owns_it_and_through_a_link() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        std::fs::create_dir_all(root.join("alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("mnt/bob")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("mnt/bob"), root.join("bob")).unwrap();
+        let roots = [root.clone()];
+        let legacy = Path::new("/var/lib/gnosisvpn");
+        // Neither dir is owned by uid 4242 or 4343: only the passwd home decides.
+        for (uid, name) in [(4242, "alice"), (4343, "bob")] {
+            let account = account_under(&user_with_home(uid, name, &root.join(name)), &roots, legacy)
+                .unwrap()
+                .unwrap();
+            assert_eq!((account.uid, account.home), (uid, root.join(name)));
+        }
+    }
+
+    #[test]
+    fn root_homes_elsewhere_missing_homes_and_the_legacy_home_are_no_accounts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        std::fs::create_dir_all(root.join("alice")).unwrap();
+        let roots = [root.clone()];
+        let legacy = Path::new("/var/lib/gnosisvpn");
+        assert!(account_under(&user_with_home(0, "toor", &root.join("alice")), &roots, legacy).is_none());
+        assert!(account_under(&user_with_home(4242, "alice", tmp.path()), &roots, legacy).is_none());
+        assert!(account_under(&user_with_home(4242, "alice", &root.join("gone")), &roots, legacy).is_none());
+        assert!(
+            account_under(
+                &user_with_home(4242, "alice", &root.join("alice")),
+                &roots,
+                &root.join("alice")
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn passwd_names_skip_comments_and_blank_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let passwd = tmp.path().join("passwd");
+        std::fs::write(
+            &passwd,
+            "root:x:0:0::/root:/bin/sh\n# comment\n\nalice:x:1000:1000::/home/alice:/bin/bash\n",
+        )
+        .unwrap();
+        assert_eq!(passwd_names(&passwd).unwrap(), ["root", "alice"]);
     }
 }

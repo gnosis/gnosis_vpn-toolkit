@@ -165,29 +165,31 @@ fn back_up_safe(
     let Some(name) = free_backup_name(from_data, &layout::safe_backup_file(from), &sha256).map_err(&fail)? else {
         return Ok(None);
     };
-    // Written under a temporary name and renamed once verified, so a failed run leaves no partial backup behind.
-    let staging = migrate::unique_name(from_data, format!(".{name}.partial")).map_err(&fail)?;
+    // Verified inside a root-owned dir the account cannot enter, then renamed out of the held handle, so the published bytes
+    // are the verified ones and a failed run leaves no partial backup under the final name.
+    let staging = migrate::unique_name(from_data, format!(".{name}.staging")).map_err(&fail)?;
+    let staging_path = from_path.join(&staging);
+    let staging_dir =
+        nofollow::create_dir(from_data, &staging, layout::DIR_MODE).map_err(migrate::destination(&staging_path))?;
     let planned = Planned {
         from: safe_path.clone(),
         source: safe,
         place: Place::Data,
-        rel: PathBuf::from(&staging),
+        rel: PathBuf::from(&name),
         sha256,
     };
     let backup_path = from_path.join(&name);
-    let published = migrate::copy_verified(&planned, from_data, from_path, account).and_then(|()| {
-        nofollow::rename(from_data, &staging, &name)
+    let published = migrate::copy_verified(&planned, &staging_dir, &staging_path, account).and_then(|()| {
+        nofollow::rename_across(&staging_dir, &name, from_data, &name)
             .and_then(|()| nofollow::sync(from_data))
             .map_err(migrate::destination(&backup_path))
     });
-    if let Err(e) = published {
-        if let Err(cleanup) = nofollow::remove(from_data, &staging)
-            && cleanup.kind() != io::ErrorKind::NotFound
-        {
-            tracing::warn!(path = %from_path.join(&staging).display(), error = %cleanup, "cannot remove the partial safe backup");
-        }
-        return Err(e);
+    if let Err(cleanup) = nofollow::remove_tree(from_data, &staging)
+        && cleanup.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %staging_path.display(), error = %cleanup, "cannot remove the safe backup staging dir");
     }
+    published?;
     Ok(Some(Move {
         from: safe_path.clone(),
         to: backup_path,
@@ -240,19 +242,25 @@ fn plan(from_data: &OwnedFd, from_path: &Path) -> Result<Vec<Planned>, Failure> 
 }
 
 /// A symlink or file at `networks/<net>` holds no identity; it is moved aside like any other stray entry.
+/// A `hopr.id` the client cannot use (a link, FIFO or dir) is an error, not an identity to keep or to replace silently.
 fn has_identity(networks: &OwnedFd, network: &str) -> io::Result<bool> {
-    match nofollow::find_dir(networks, network.as_ref()) {
-        Ok(Some(dir)) => nofollow::exists(&dir, layout::IDENTITY_FILE),
-        Ok(None) => Ok(false),
+    let dir = match nofollow::find_dir(networks, network.as_ref()) {
+        Ok(Some(dir)) => dir,
+        Ok(None) => return Ok(false),
         Err(e)
             if matches!(
                 rustix::io::Errno::from_io_error(&e),
                 Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
             ) =>
         {
-            Ok(false)
+            return Ok(false);
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    match nofollow::open_regular_file(&dir, layout::IDENTITY_FILE) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(io::Error::other(format!("{} is unusable: {e}", layout::IDENTITY_FILE))),
     }
 }
 
@@ -425,6 +433,27 @@ mod tests {
         assert_eq!(
             names(&data(alice, FROM)),
             [layout::IDENTITY_FILE, layout::PASSWORD_FILE, layout::PIX_DIR]
+        );
+    }
+
+    #[test]
+    fn an_unusable_identity_on_the_new_network_fails_that_user_instead_of_counting_as_kept() {
+        let fx = fixture(&["alice"]);
+        let alice = &fx.accounts[0];
+        on_old_network(alice);
+        fs::create_dir_all(data(alice, TO)).unwrap();
+        std::os::unix::fs::symlink(
+            fx.tmp.path().join("nowhere"),
+            data(alice, TO).join(layout::IDENTITY_FILE),
+        )
+        .unwrap();
+        let report = fx.run();
+        assert!(report.kept.is_empty() && report.copied.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            report.failed[0].error.contains("unusable"),
+            "{}",
+            report.failed[0].error
         );
     }
 

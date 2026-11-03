@@ -243,15 +243,18 @@ retiring, so the identity lands next to the safe that belongs to it before
 `switch-network` moves it on.
 
 `switch-network` carries identities from a retired network (`--from`) to the
-one the config link names, for every account whose home is a dir under
-`/home` or `/var/home` (Linux) or `/Users` (macOS). Per user with
+one the config link names, for every non-root account whose passwd home is a
+dir right under `/home` or `/var/home` (Linux) or `/Users` (macOS), whoever owns
+it and also through a symlink. Accounts are found as the owner or namesake of
+each dir there and, on Linux, in `/etc/passwd`. Per user with
 `networks/<from>/hopr.id`:
 
 - `hopr.id` and `hopr.pass` are copied (staged and verified like `identity`) to
   `networks/<to>/`, so the node address stays the same. The safe and PIX state
   belong to the old network's contracts and are not copied; the client finds
   or deploys a safe on the new network and writes a fresh `hopr.safe`.
-- A user who already has `networks/<to>/hopr.id` keeps it. Anything else at
+- A user who already has a regular `networks/<to>/hopr.id` keeps it; a link,
+  FIFO or dir by that name fails that user instead. Anything else at
   `networks/<to>` (e.g. an orphaned cached safe) moves to
   `networks/<to>.replaced-<ts>/` first.
 - The old network's `hopr.safe` is copied to `networks/<from>/hopr.safe.<from>.bak`

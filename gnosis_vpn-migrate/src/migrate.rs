@@ -919,7 +919,7 @@ fn write_marker(staging: &OwnedFd, staging_path: &Path, content: &str, account: 
     marker.sync_all().map_err(&dest)
 }
 
-/// Data first; a failed cache rename takes the data back, so a retry starts from the same state.
+/// Data first; any later failure takes the published dirs back to staging, so the caller's cleanup and restore see the old state.
 pub(crate) fn publish(networks: &Networks, staging: &str, network: &str) -> Result<(), Failure> {
     let rename_failed = |path: &Path, e: io::Error| {
         Failure::new(
@@ -929,17 +929,28 @@ pub(crate) fn publish(networks: &Networks, staging: &str, network: &str) -> Resu
     };
     nofollow::rename(&networks.data, staging, network).map_err(|e| rename_failed(&networks.data_path, e))?;
     if let Err(e) = nofollow::rename(&networks.cache, staging, network) {
-        if let Err(undo) = nofollow::rename(&networks.data, network, staging) {
-            tracing::error!(error = %undo, "cannot take the published data dir back");
-        }
+        unpublish(networks, network, staging, &[Place::Data]);
         return Err(rename_failed(&networks.cache_path, e));
     }
     for place in [Place::Data, Place::Cache] {
         let (dir, path) = networks.side(place);
-        nofollow::sync(dir).map_err(destination(path))?;
+        if let Err(e) = nofollow::sync(dir) {
+            unpublish(networks, network, staging, &[Place::Cache, Place::Data]);
+            return Err(destination(path)(e));
+        }
     }
     tracing::info!(network, "renamed into place");
     Ok(())
+}
+
+/// Best effort: the run is already failing, so a failed undo is only logged.
+fn unpublish(networks: &Networks, network: &str, staging: &str, places: &[Place]) {
+    for place in places {
+        let (dir, path) = networks.side(*place);
+        if let Err(e) = nofollow::rename(dir, network, staging) {
+            tracing::error!(path = %path.join(network).display(), error = %e, "cannot take the published dir back");
+        }
+    }
 }
 
 pub(crate) fn destination(path: &Path) -> impl Fn(io::Error) -> Failure + '_ {
