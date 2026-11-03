@@ -246,7 +246,9 @@ retiring, so the identity lands next to the safe that belongs to it before
 one the config link names, for every non-root account whose passwd home is a
 dir right under `/home` or `/var/home` (Linux) or `/Users` (macOS), whoever owns
 it and also through a symlink. Accounts are found as the owner or namesake of
-each dir there and, on Linux, in `/etc/passwd`. Per user with
+each dir there and among the local accounts (`/etc/passwd` on Linux, the local
+directory node on macOS); accounts sharing a uid each count with their own home.
+Per user with
 `networks/<from>/hopr.id`:
 
 - `hopr.id` and `hopr.pass` are copied (staged and verified like `identity`) to
@@ -262,9 +264,10 @@ each dir there and, on Linux, in `/etc/passwd`. Per user with
   what drains its funds. The `<from>` dirs are otherwise left in place, so
   switching back to the old network keeps working.
 
-A legacy `.config/gnosisvpn-hopr.safe` that `identity` has not migrated yet is
-renamed to `gnosisvpn-hopr.safe.<from>.bak`, so a later `identity` carries no
-stale safe. One user's failure never stops the others; the outcome lists it, as
+A legacy `.config/gnosisvpn-hopr.safe` and `curvy-pix.redb` that `identity` has
+not migrated yet are renamed to `gnosisvpn-hopr.safe.<from>.bak` and
+`curvy-pix.redb.<from>.bak`, so a later `identity` carries neither onto the new
+network. One user's failure never stops the others; the outcome lists it, as
 it does a home it could not inspect. A rerun never writes a second backup with
 the same bytes, and a backup is renamed into place only once verified.
 

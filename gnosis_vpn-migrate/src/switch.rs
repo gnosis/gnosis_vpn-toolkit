@@ -58,6 +58,14 @@ pub fn switch_network(req: &SwitchRequest<'_>) -> Report {
             error: e.error,
         }),
     }
+    match move_aside_legacy_pix(req.legacy_home, req.from) {
+        Ok(Some(m)) => report.moved_aside.push(m),
+        Ok(None) => {}
+        Err(e) => report.failed.push(Problem {
+            path: req.legacy_home.to_path_buf(),
+            error: e.error,
+        }),
+    }
     let ts = migrate::timestamp();
     for account in req.accounts {
         if let Err(e) = switch_account(req, account, &ts, &mut report) {
@@ -97,6 +105,29 @@ fn back_up_legacy_safe(legacy_home: &Path, from: &str) -> Result<Option<Move>, F
     Ok(Some(moved))
 }
 
+/// The legacy PIX db belongs to the retired network's pool like the safe; aside, a later `identity` cannot carry it on.
+fn move_aside_legacy_pix(legacy_home: &Path, from: &str) -> Result<Option<Move>, Failure> {
+    let db_path = legacy_home.join(layout::PIX_DB_FILE);
+    let fail = |e: io::Error| Failure::new(Stage::Legacy, migrate::with_path(&db_path, &e));
+    let home = match nofollow::open_home(legacy_home) {
+        Ok(home) => home,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(fail(e)),
+    };
+    if !nofollow::exists(&home, layout::PIX_DB_FILE).map_err(fail)? {
+        return Ok(None);
+    }
+    let aside = migrate::unique_name(&home, format!("{}.{from}.bak", layout::PIX_DB_FILE)).map_err(fail)?;
+    nofollow::rename(&home, layout::PIX_DB_FILE, &aside).map_err(fail)?;
+    nofollow::sync(&home).map_err(fail)?;
+    let moved = Move {
+        from: db_path.clone(),
+        to: legacy_home.join(aside),
+    };
+    tracing::info!(from = %moved.from.display(), to = %moved.to.display(), "legacy PIX db of the retired network moved aside");
+    Ok(Some(moved))
+}
+
 fn switch_account(req: &SwitchRequest<'_>, account: &Account, ts: &str, report: &mut Report) -> Result<(), Failure> {
     let layout = layout::user_layout();
     let home = nofollow::open_home(&account.home).map_err(migrate::destination(&account.home))?;
@@ -121,14 +152,15 @@ fn switch_account(req: &SwitchRequest<'_>, account: &Account, ts: &str, report: 
         return Ok(());
     }
     let plan = plan(&from_data, &from_path)?;
+    let staging = networks.free_staging(req.to, ts)?;
     // Whatever is there holds no identity, only state (e.g. a cached safe) that would bind the carried one to it.
     let replaced = networks.move_aside(req.to, "replaced", ts)?;
-    let staging = format!("{}.migrating-{ts}", req.to);
     let marker = migrate::marker_content(&from_path, req.toolkit_version);
-    let installed = migrate::stage(&networks, &staging, &plan, &marker, account)
+    let mut created = Vec::new();
+    let installed = migrate::stage(&networks, &staging, &plan, &marker, account, &mut created)
         .and_then(|()| migrate::publish(&networks, &staging, req.to));
     if let Err(e) = installed {
-        networks.remove(&staging);
+        networks.remove(&staging, &created);
         networks.restore(&replaced);
         return Err(e);
     }
@@ -504,19 +536,57 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_safe_is_moved_aside_only_while_the_legacy_dir_still_holds_it() {
+    fn the_legacy_safe_and_pix_db_are_moved_aside_only_while_the_legacy_dir_still_holds_them() {
         let fx = fixture(&[]);
         let config = fx.legacy.join(layout::LEGACY_CONFIG_DIR);
         fs::create_dir_all(&config).unwrap();
         fs::write(config.join(layout::LEGACY_IDENTITY_FILE), "legacy id").unwrap();
         fs::write(config.join(layout::LEGACY_SAFE_FILE), "legacy jura safe").unwrap();
+        fs::write(fx.legacy.join(layout::PIX_DB_FILE), "legacy jura pix").unwrap();
         let report = fx.run();
         let backup = config.join(format!("{}.{FROM}.bak", layout::LEGACY_SAFE_FILE));
         assert_eq!(report.safe_backups[0].to, backup);
         assert_eq!(fs::read_to_string(&backup).unwrap(), "legacy jura safe");
         assert!(!config.join(layout::LEGACY_SAFE_FILE).exists());
         assert!(config.join(layout::LEGACY_IDENTITY_FILE).exists());
+        let pix = fx.legacy.join(format!("{}.{FROM}.bak", layout::PIX_DB_FILE));
+        assert_eq!(report.moved_aside[0].to, pix);
+        assert_eq!(fs::read_to_string(&pix).unwrap(), "legacy jura pix");
+        assert!(!fx.legacy.join(layout::PIX_DB_FILE).exists());
         assert!(fx.run().is_empty());
+    }
+
+    #[test]
+    fn another_runs_staging_dir_survives_a_failed_switch() {
+        // Root may chown to any uid, so only an unprivileged run fails mid-stage.
+        if crate::user::is_root() {
+            return;
+        }
+        let mut fx = fixture(&["alice"]);
+        fx.accounts[0].uid += 1;
+        let alice = &fx.accounts[0];
+        on_old_network(alice);
+        fs::remove_file(cache(alice, FROM).join(layout::SAFE_FILE)).unwrap();
+        let networks = data(alice, TO).parent().unwrap().to_path_buf();
+        let now = chrono::Utc::now();
+        let theirs: Vec<PathBuf> = (0..5)
+            .map(|offset| {
+                let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+                networks.join(format!("{TO}.migrating-{ts}"))
+            })
+            .collect();
+        for dir in &theirs {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(layout::IDENTITY_FILE), "another run's id").unwrap();
+        }
+        assert_eq!(fx.run().failed.len(), 1);
+        for dir in &theirs {
+            assert_eq!(
+                fs::read_to_string(dir.join(layout::IDENTITY_FILE)).unwrap(),
+                "another run's id"
+            );
+        }
+        assert!(!data(alice, TO).exists());
     }
 
     #[test]

@@ -358,14 +358,15 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
 
     let ts = timestamp();
     let networks = Networks::create(req.account, &layout)?;
+    let staging = networks.free_staging(req.network, &ts)?;
     let replaced = networks.move_aside(req.network, "replaced", &ts)?;
-    let staging = format!("{}.migrating-{ts}", req.network);
     let marker = marker_content(&legacy.config_dir, req.toolkit_version);
-    let installed = stage(&networks, &staging, &plan, &marker, req.account)
+    let mut created = Vec::new();
+    let installed = stage(&networks, &staging, &plan, &marker, req.account, &mut created)
         .and_then(|()| publish(&networks, &staging, req.network));
     if let Err(e) = installed {
         tracing::warn!(error = %e.error, "migration failed, removing the staging dirs and restoring replaced ones");
-        networks.remove(&staging);
+        networks.remove(&staging, &created);
         networks.restore(&replaced);
         return Err(e);
     }
@@ -810,9 +811,28 @@ impl Networks {
         }
     }
 
-    pub(crate) fn remove(&self, staging: &str) {
-        for place in [Place::Data, Place::Cache] {
-            let (dir, path) = self.side(place);
+    /// Free in both dirs: the timestamp repeats within a second, and another run may hold the name.
+    pub(crate) fn free_staging(&self, network: &str, ts: &str) -> Result<String, Failure> {
+        let base = format!("{network}.migrating-{ts}");
+        let mut n = 0;
+        loop {
+            let name = if n == 0 { base.clone() } else { format!("{base}.{n}") };
+            let mut taken = false;
+            for place in [Place::Data, Place::Cache] {
+                let (dir, path) = self.side(place);
+                taken |= nofollow::exists(dir, &name).map_err(destination(&path.join(&name)))?;
+            }
+            if !taken {
+                return Ok(name);
+            }
+            n += 1;
+        }
+    }
+
+    /// Only the staging dirs this run created: one another run holds under the same name is never touched.
+    pub(crate) fn remove(&self, staging: &str, created: &[Place]) {
+        for place in created {
+            let (dir, path) = self.side(*place);
             match nofollow::remove_tree(dir, staging) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -842,18 +862,21 @@ fn move_aside_in(
 }
 
 /// Both staging dirs stay root-owned until filled, so the user cannot plant entries in them; data first, then cache.
+/// Each dir this run creates is pushed to `created`, which is all a failed run may remove again.
 pub(crate) fn stage(
     networks: &Networks,
     name: &str,
     plan: &[Planned],
     marker: &str,
     account: &Account,
+    created: &mut Vec<Place>,
 ) -> Result<(), Failure> {
     for place in [Place::Data, Place::Cache] {
         let (parent, parent_path) = networks.side(place);
         let path = parent_path.join(name);
         let dest = destination(&path);
         let dir = nofollow::create_dir(parent, name, layout::DIR_MODE).map_err(&dest)?;
+        created.push(place);
         for planned in plan.iter().filter(|p| p.place == place) {
             copy_verified(planned, &dir, &path, account)?;
         }
@@ -1242,7 +1265,8 @@ mod tests {
         let legacy = Legacy::find(&fx.legacy).unwrap().unwrap();
         let plan = legacy.plan().unwrap();
         let networks = Networks::create(&fx.account, &layout::user_layout()).unwrap();
-        stage(&networks, "staging", &plan, "marker", &fx.account).unwrap();
+        let mut created = Vec::new();
+        stage(&networks, "staging", &plan, "marker", &fx.account, &mut created).unwrap();
         // A non-empty dir cannot be renamed over.
         let blocker = fx.target().cache.join("occupied");
         fs::create_dir_all(&blocker).unwrap();
@@ -1254,7 +1278,7 @@ mod tests {
             entries(&layout.data.join(layout::NETWORKS_DIR)),
             vec!["staging".to_string()]
         );
-        networks.remove("staging");
+        networks.remove("staging", &created);
         assert!(entries(&layout.data.join(layout::NETWORKS_DIR)).is_empty());
         assert_eq!(
             entries(&layout.cache.join(layout::NETWORKS_DIR)),
@@ -1263,23 +1287,65 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_symlink_in_the_destination_is_never_written_through() {
+    fn a_planted_staging_name_is_skipped_never_written_through_nor_removed() {
         let fx = fixture();
         fx.with_legacy(&["id", "pass"]);
         let victim = fx._tmp.path().join("victim");
         fs::write(&victim, "root-owned bytes").unwrap();
         let networks = fx.layout().data.join(layout::NETWORKS_DIR);
         fs::create_dir_all(&networks).unwrap();
-        // The staging name is predictable to the second, so plant it for the next few seconds.
+        // The base staging name is predictable to the second, so plant it for the next few seconds.
         let now = chrono::Utc::now();
-        for offset in 0..5 {
-            let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
-            std::os::unix::fs::symlink(&victim, networks.join(format!("{NETWORK}.migrating-{ts}"))).unwrap();
+        let planted: Vec<PathBuf> = (0..5)
+            .map(|offset| {
+                let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+                networks.join(format!("{NETWORK}.migrating-{ts}"))
+            })
+            .collect();
+        for link in &planted {
+            std::os::unix::fs::symlink(&victim, link).unwrap();
         }
-        let err = fx.run(false, false).unwrap_err();
-        assert_eq!(err.stage, Stage::Destination);
+        assert!(matches!(fx.run(false, false).unwrap(), Outcome::Migrated { .. }));
         assert_eq!(fs::read_to_string(&victim).unwrap(), "root-owned bytes");
-        assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
+        for link in &planted {
+            assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[test]
+    fn a_failed_run_removes_only_the_staging_dirs_it_created() {
+        // Root may chown to any uid, so only an unprivileged run fails mid-stage.
+        if user::is_root() {
+            return;
+        }
+        let mut fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let layout = fx.layout();
+        fs::create_dir_all(layout.data.join(layout::NETWORKS_DIR)).unwrap();
+        fs::create_dir_all(layout.cache.join(layout::NETWORKS_DIR)).unwrap();
+        let now = chrono::Utc::now();
+        let theirs: Vec<PathBuf> = (0..5)
+            .map(|offset| {
+                let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+                layout
+                    .data
+                    .join(layout::NETWORKS_DIR)
+                    .join(format!("{NETWORK}.migrating-{ts}"))
+            })
+            .collect();
+        for dir in &theirs {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(layout::IDENTITY_FILE), "another run's id").unwrap();
+        }
+        fx.account.uid += 1;
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Destination);
+        for dir in &theirs {
+            assert_eq!(
+                fs::read_to_string(dir.join(layout::IDENTITY_FILE)).unwrap(),
+                "another run's id"
+            );
+        }
+        assert_eq!(entries(&layout.data.join(layout::NETWORKS_DIR)).len(), theirs.len());
     }
 
     #[test]

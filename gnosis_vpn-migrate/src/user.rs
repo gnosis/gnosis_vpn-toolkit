@@ -52,9 +52,15 @@ pub fn resolve(name: &str, legacy_home: &Path) -> Result<Account, String> {
     })
 }
 
+/// Where local accounts are listed by name, so each is found whoever owns its home and whatever that home is called.
+#[cfg(target_os = "linux")]
+const LOCAL_ACCOUNTS: &str = "/etc/passwd";
+#[cfg(target_os = "macos")]
+const LOCAL_ACCOUNTS: &str = "/var/db/dslocal/nodes/Default/users";
+
 /// Every non-root account whose passwd home is a dir right under one of `roots`, judged by that home and not by who owns it.
-/// Candidates are the owner and the namesake of each dir there and, on Linux, the local passwd file; the legacy home is left out.
-/// A root, entry or passwd file that cannot be read is returned as a problem: its user would otherwise be skipped silently.
+/// Candidates are the owner and the namesake of each dir there plus every local account; the legacy home is left out.
+/// A root, entry or account list that cannot be read is returned as a problem: its user would otherwise be skipped silently.
 pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, Vec<Problem>) {
     let mut candidates = Vec::new();
     let mut problems = Vec::new();
@@ -93,13 +99,30 @@ pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, V
         }
     }
     #[cfg(target_os = "linux")]
-    match passwd_names(Path::new("/etc/passwd")) {
+    let local = passwd_names(Path::new(LOCAL_ACCOUNTS));
+    #[cfg(target_os = "macos")]
+    let local = dslocal_names(Path::new(LOCAL_ACCOUNTS));
+    match local {
         Ok(names) => candidates.extend(names.iter().filter_map(uzers::get_user_by_name)),
-        Err(e) => problems.push(problem(Path::new("/etc/passwd"), format!("cannot read: {e}"))),
+        Err(e) => problems.push(problem(Path::new(LOCAL_ACCOUNTS), format!("cannot read: {e}"))),
     }
+    let accounts = accounts_among(candidates, roots, legacy_home, &mut problems);
+    (accounts, problems)
+}
+
+/// Each candidate found more than once is kept once, by uid and home: accounts sharing a uid may each have their own home.
+fn accounts_among(
+    candidates: Vec<uzers::User>,
+    roots: &[PathBuf],
+    legacy_home: &Path,
+    problems: &mut Vec<Problem>,
+) -> Vec<Account> {
     let mut accounts: Vec<Account> = Vec::new();
     for user in candidates {
-        if accounts.iter().any(|a| a.uid == user.uid()) {
+        if accounts
+            .iter()
+            .any(|a| a.uid == user.uid() && a.home == user.home_dir())
+        {
             continue;
         }
         match account_under(&user, roots, legacy_home) {
@@ -108,7 +131,7 @@ pub fn local_accounts(roots: &[PathBuf], legacy_home: &Path) -> (Vec<Account>, V
             None => {}
         }
     }
-    (accounts, problems)
+    accounts
 }
 
 /// `Some` when `user` is not root and its passwd home is an existing dir right under one of `roots`, other than the legacy home.
@@ -132,7 +155,7 @@ fn account_under(user: &uzers::User, roots: &[PathBuf], legacy_home: &Path) -> O
 }
 
 /// The account names in a passwd file; comments and blank lines are skipped.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn passwd_names(path: &Path) -> io::Result<Vec<String>> {
     Ok(std::fs::read_to_string(path)?
         .lines()
@@ -141,6 +164,21 @@ fn passwd_names(path: &Path) -> io::Result<Vec<String>> {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// The account names of macOS's local directory node: one `<name>.plist` record each.
+#[cfg(any(target_os = "macos", test))]
+fn dslocal_names(dir: &Path) -> io::Result<Vec<String>> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let file_name = entry?.file_name();
+        if let Some(name) = file_name.to_str().and_then(|name| name.strip_suffix(".plist"))
+            && !name.is_empty()
+        {
+            names.push(name.to_string());
+        }
+    }
+    Ok(names)
 }
 
 fn problem(path: &Path, error: String) -> Problem {
@@ -229,7 +267,9 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("someone"), tmp.path().join("link")).unwrap();
         let roots = [tmp.path().to_path_buf(), tmp.path().join("missing")];
         let (accounts, problems) = local_accounts(&roots, Path::new("/var/lib/gnosisvpn"));
-        assert!(accounts.is_empty() && problems.is_empty());
+        assert!(accounts.is_empty());
+        // An unprivileged macOS run cannot read the root-only account list; only problems under the temp dir count.
+        assert!(!problems.iter().any(|p| p.path.starts_with(tmp.path())));
     }
 
     #[test]
@@ -246,8 +286,9 @@ mod tests {
         let (accounts, problems) = local_accounts(std::slice::from_ref(&root), Path::new("/var/lib/gnosisvpn"));
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(accounts.is_empty());
-        assert_eq!(problems.len(), 1);
-        assert_eq!(problems[0].path, root);
+        let under_tmp: Vec<_> = problems.iter().filter(|p| p.path.starts_with(tmp.path())).collect();
+        assert_eq!(under_tmp.len(), 1);
+        assert_eq!(under_tmp[0].path, root);
     }
 
     fn user_with_home(uid: u32, name: &str, home: &Path) -> uzers::User {
@@ -292,7 +333,39 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[test]
+    fn accounts_sharing_a_uid_each_count_with_their_own_home_and_repeats_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("home");
+        for name in ["alice", "bob"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let alice = user_with_home(1000, "alice", &root.join("alice"));
+        let bob = user_with_home(1000, "bob", &root.join("bob"));
+        let candidates = vec![alice.clone(), bob, alice];
+        let mut problems = Vec::new();
+        let accounts = accounts_among(
+            candidates,
+            std::slice::from_ref(&root),
+            Path::new("/var/lib/gnosisvpn"),
+            &mut problems,
+        );
+        let homes: Vec<_> = accounts.iter().map(|a| a.home.clone()).collect();
+        assert_eq!(homes, [root.join("alice"), root.join("bob")]);
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn dslocal_names_are_the_plist_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        for file in ["alice.plist", "_www.plist", ".plist", "notes.txt"] {
+            std::fs::write(tmp.path().join(file), "").unwrap();
+        }
+        let mut names = dslocal_names(tmp.path()).unwrap();
+        names.sort();
+        assert_eq!(names, ["_www", "alice"]);
+    }
+
     #[test]
     fn passwd_names_skip_comments_and_blank_lines() {
         let tmp = tempfile::tempdir().unwrap();
