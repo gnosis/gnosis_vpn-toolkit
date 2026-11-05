@@ -248,7 +248,6 @@ pub enum CheckOutcome {
         current: String,
         channel: Channel,
     },
-    VpnNotConnected,
     IntegrityError(String),
     Error(String),
 }
@@ -290,7 +289,6 @@ impl std::fmt::Display for CheckResult {
                 writeln!(f, "No release published on {}", channel.title())?;
                 write!(f, "Current installed version: {current}")
             }
-            CheckOutcome::VpnNotConnected => f.write_str("VPN not connected — pass --force to bypass"),
             CheckOutcome::IntegrityError(e) => write!(f, "Integrity error: {e}"),
             CheckOutcome::Error(e) => write!(f, "Error: {e}"),
         }?;
@@ -312,25 +310,14 @@ impl std::fmt::Display for CheckResult {
     }
 }
 
-/// Decide whether `channel` has an update over `current_version`; needs the VPN
-/// unless `force`. The whole manifest rides along on every fetched outcome.
-pub async fn check(
-    client: &Client,
-    channel: Channel,
-    current_version: &str,
-    socket_path: &std::path::Path,
-    force: bool,
-) -> CheckResult {
+/// Decide whether `channel` has an update over `current_version`; the VPN is the caller's call.
+pub async fn check(client: &Client, channel: Channel, current_version: &str) -> CheckResult {
     let bare = |outcome| CheckResult {
         channel,
         outcome,
         end_of_life: None,
         manifest: None,
     };
-
-    if !force && crate::vpn_status::ensure_connected(socket_path).await.is_err() {
-        return bare(CheckOutcome::VpnNotConnected);
-    }
 
     let manifest = match manifest::download(client, channel).await {
         Ok(m) => m,
@@ -384,10 +371,6 @@ pub struct EngineInput {
     pub attempt_state_path: Option<PathBuf>,
     /// Optional audit log path; appended to on every terminal status.
     pub audit_log_path: Option<PathBuf>,
-    /// Bypass the VPN-connected gate. False in production.
-    pub skip_vpn_check: bool,
-    /// Socket path for the VPN-connected check.
-    pub socket_path: PathBuf,
 }
 
 /// Spawn the install engine task and return an `mpsc::Receiver` that yields
@@ -441,11 +424,6 @@ async fn drive_engine(
 ) -> Result<EngineOutcome, (UpdateStage, String)> {
     let _ = tx.send(UpdateStatus::Checking).await;
 
-    if !input.skip_vpn_check {
-        crate::vpn_status::ensure_connected(&input.socket_path)
-            .await
-            .map_err(|e| (UpdateStage::Check, e.to_string()))?;
-    }
     let manifest = manifest::download(&input.client, input.channel)
         .await
         .map_err(|e| (UpdateStage::Check, e.to_string()))?;
@@ -1349,7 +1327,6 @@ mod tests {
     #[test]
     fn check_result_omits_manifest_when_fetch_failed() {
         for outcome in [
-            CheckOutcome::VpnNotConnected,
             CheckOutcome::IntegrityError("boom".to_string()),
             CheckOutcome::Error("boom".to_string()),
         ] {
@@ -1365,11 +1342,11 @@ mod tests {
         // The outcome variants keep the shapes they had before `CheckResult`.
         let v = json_of(&CheckResult {
             channel: Channel::Stable,
-            outcome: CheckOutcome::VpnNotConnected,
+            outcome: CheckOutcome::Error("boom".to_string()),
             end_of_life: None,
             manifest: None,
         });
-        assert_eq!(v["outcome"], "VpnNotConnected");
+        assert_eq!(v["outcome"]["Error"], "boom");
     }
 
     #[test]
@@ -1409,7 +1386,6 @@ mod tests {
     #[test]
     fn check_result_display_is_one_line_without_a_manifest() {
         for outcome in [
-            CheckOutcome::VpnNotConnected,
             CheckOutcome::IntegrityError("boom".to_string()),
             CheckOutcome::Error("boom".to_string()),
         ] {

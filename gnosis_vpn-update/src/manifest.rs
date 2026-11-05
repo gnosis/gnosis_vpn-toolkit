@@ -1,9 +1,6 @@
 //! Update manifest types + fetch.
 //!
-//! Ported from `gnosis_vpn-lib::check_update`. The VPN-connected gate that
-//! previously lived here (`ensure_vpn_connected`, which reached the daemon over
-//! the socket) has moved to [`crate::vpn_status`]; `download` no longer knows
-//! about the socket. Callers apply the gate before fetching.
+//! Ported from `gnosis_vpn-lib::check_update`; whether the VPN must be up is the caller's decision.
 
 use backon::{ExponentialBuilder, Retryable};
 use bytesize::ByteSize;

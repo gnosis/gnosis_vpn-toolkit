@@ -92,7 +92,7 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
                 Some(c) => c.into(),
                 None => update::channel_of_version(&current_version),
             };
-            update::check(&client, channel, &current_version, &args.socket_path, args.force).await
+            update::check(&client, channel, &current_version).await
         }
         // Without an installed version the channel cannot be inferred; fall
         // back to whatever was asked for. The outcome is an error either way.
@@ -113,7 +113,7 @@ async fn run_check(format: OutputFormat, args: cli::CheckArgs) -> ExitCode {
     exit_for_check(&result)
 }
 
-/// Linux has no install engine: refuse before touching the version file, the socket or the network, and point at apt.
+/// Linux has no install engine: refuse before touching the version file or the network, and point at apt.
 #[cfg(target_os = "linux")]
 async fn run_update(format: OutputFormat, _args: cli::UpdateArgs) -> ExitCode {
     let status = UpdateStatus::Failed {
@@ -152,8 +152,6 @@ async fn run_update(format: OutputFormat, args: cli::UpdateArgs) -> ExitCode {
         download_dir: update::paths::download_dir(),
         attempt_state_path: Some(update::paths::attempt_state_path()),
         audit_log_path: Some(update::paths::audit_log_path()),
-        skip_vpn_check: args.force,
-        socket_path: args.socket_path,
     };
 
     let mut rx = update::install_engine(input);
@@ -186,7 +184,6 @@ fn exit_for_check(result: &CheckResult) -> ExitCode {
     match &result.outcome {
         CheckOutcome::UpToDate { .. } | CheckOutcome::Available { .. } => exitcode::OK,
         CheckOutcome::NoReleaseForChannel { .. } => exitcode::UNAVAILABLE,
-        CheckOutcome::VpnNotConnected => exitcode::NOPERM,
         CheckOutcome::IntegrityError(_) => exitcode::SOFTWARE,
         CheckOutcome::Error(_) => exitcode::UNAVAILABLE,
     }

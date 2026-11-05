@@ -1,10 +1,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::PathBuf;
 
 pub use gnosis_vpn_toolkit_common::output::OutputFormat;
 
 use crate::manifest::Channel;
-use crate::vpn_status;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum ChannelArg {
@@ -42,8 +40,7 @@ pub enum Command {
     /// Download and install an update, streaming progress on stdout.
     ///
     /// Must be run with privileges sufficient to install system packages
-    /// (root). Refuses to run unless the VPN is connected; pass --force to
-    /// bypass that check.
+    /// (root). The caller decides whether the VPN must be connected first.
     Update(UpdateArgs),
 
     /// Check whether an update is available; prints one result on stdout.
@@ -65,13 +62,9 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub allow_downgrade: bool,
 
-    /// Bypass the VPN-connected check (insecure)
-    #[arg(short = 'f', long)]
+    /// Ignored: the caller decides about the VPN, older apps still pass it.
+    #[arg(short = 'f', long, hide = true)]
     pub force: bool,
-
-    /// Path to the gnosis_vpn daemon socket (for the VPN-connected check)
-    #[arg(short = 's', long, env = vpn_status::ENV_VAR, default_value = vpn_status::DEFAULT_SOCKET_PATH)]
-    pub socket_path: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]
@@ -81,13 +74,9 @@ pub struct CheckArgs {
     #[arg(short = 'c', long, value_enum)]
     pub channel: Option<ChannelArg>,
 
-    /// Bypass the VPN-connected check (insecure)
-    #[arg(short = 'f', long)]
+    /// Ignored: the caller decides about the VPN, older apps still pass it.
+    #[arg(short = 'f', long, hide = true)]
     pub force: bool,
-
-    /// Path to the gnosis_vpn daemon socket (for the VPN-connected check)
-    #[arg(short = 's', long, env = vpn_status::ENV_VAR, default_value = vpn_status::DEFAULT_SOCKET_PATH)]
-    pub socket_path: PathBuf,
 }
 
 pub fn parse() -> Cli {
