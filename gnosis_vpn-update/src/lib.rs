@@ -5,4 +5,3 @@ pub mod manifest;
 #[cfg(test)]
 mod test_server;
 pub mod update;
-pub mod vpn_status;

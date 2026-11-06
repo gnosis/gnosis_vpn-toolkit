@@ -20,10 +20,9 @@ Future tools are added as sibling member crates. One release ships every tool
 (`binary-toolkit-<arch>` builds them all), so the installer can only bump to a
 toolkit version that carries both artifacts.
 
-Unlike the client, these tools run **no socket server**: they communicate
-purely over stdout. `gnosis_vpn-update` does open a small read-only client
-connection to the running `gnosis_vpn` daemon socket to check whether the VPN
-is connected before updating (see the `--force` flag to bypass).
+Unlike the client, these tools never touch the `gnosis_vpn` daemon socket: they
+communicate purely over stdout. Whether an update must wait for the VPN is the
+caller's decision (`gnosis_vpn-app` gates on the daemon's status).
 
 ## gnosis_vpn-update
 
@@ -37,8 +36,8 @@ is connected before updating (see the `--force` flag to bypass).
     `Installing`, then a terminal `Completed` or `Failed`).
   - `check-update` prints a single result object
     `{"channel": …, "outcome": …, "end_of_life": …, "manifest": …}`. `outcome`
-    is the gated decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
-    `VpnNotConnected`, `IntegrityError`, `Error`) and `channel` is the one that
+    is the decision (`UpToDate`, `Available`, `NoReleaseForChannel`,
+    `IntegrityError`, `Error`) and `channel` is the one that
     was checked — the `--channel` value, or the channel inferred from the
     installed version. `UpToDate`, `Available` and `NoReleaseForChannel` name
     the installed version they were reached for as `current` (older toolkits
@@ -47,8 +46,7 @@ is connected before updating (see the `--force` flag to bypass).
     **every** channel entry — `channels.stable`, `channels.snapshot` and
     `channels.experimental` — but not their raw `end_of_life` lists (see
     below), so one invocation yields the whole release picture as well as the
-    decision. It is omitted when no manifest was fetched (`VpnNotConnected`,
-    `IntegrityError`, and an `Error` raised before or during the fetch), where
+    decision. It is omitted when no manifest was fetched (`IntegrityError`, and an `Error` raised before or during the fetch), where
     a consumer should keep its last known one; the `Error` for an app too old
     to update directly comes after the fetch and still carries it.
   - `end_of_life` is `{"version": …, "ends_at": …, "reason": …}`: the
@@ -88,8 +86,7 @@ is connected before updating (see the `--force` flag to bypass).
 ### Usage
 
 ```console
-# Check for an update on the installed version's channel (needs the VPN
-# connected, or --force)
+# Check for an update on the installed version's channel
 gnosis_vpn-update check-update
 
 # Install an update (macOS only; must run as root; streams progress as NDJSON)
