@@ -3,8 +3,11 @@ use std::process;
 
 use clap::Parser;
 
-use gnosis_vpn_migrate::cli::{Cli, Command, IdentityArgs, LayoutArgs, OutputFormat, StartCleanArgs, UploadLogArgs};
+use gnosis_vpn_migrate::cli::{
+    Cli, Command, IdentityArgs, LayoutArgs, OutputFormat, StartCleanArgs, SwitchNetworkArgs, UploadLogArgs,
+};
 use gnosis_vpn_migrate::migrate::{self, Failure, IdentityRequest, MigrateResult, Outcome, Stage};
+use gnosis_vpn_migrate::switch::{self, SwitchRequest};
 use gnosis_vpn_migrate::upload::{self, BundleSources};
 use gnosis_vpn_migrate::user::Account;
 use gnosis_vpn_migrate::{layout, network, relocate, user};
@@ -21,7 +24,7 @@ async fn main() {
     let log_file = (!matches!(cli.command, Command::Version)).then(layout::migrate_log);
     logging::setup(log_file.as_deref());
     tracing::info!(version = VERSION, command = ?cli.command, "gnosis_vpn-migrate start");
-    let user_name = command_user(&cli.command);
+    let retry = Retry::of(&cli.command);
 
     let outcome = match cli.command {
         Command::Version => {
@@ -30,6 +33,7 @@ async fn main() {
         }
         Command::Identity(args) => require_root().and_then(|()| run_identity(&args)),
         Command::StartClean(args) => require_root().and_then(|()| run_start_clean(&args)),
+        Command::SwitchNetwork(args) => require_root().and_then(|()| run_switch_network(&args)),
         Command::Layout(args) => require_root().and_then(|()| run_layout(&args)),
         Command::UploadLog(args) => match require_root() {
             Ok(()) => run_upload(&args).await,
@@ -45,7 +49,7 @@ async fn main() {
         OutputFormat::Plain => println!("{outcome}"),
     }
     if code != exitcode::OK {
-        print_paths_forward(&outcome, &layout::migrate_log(), user_name.as_deref());
+        print_paths_forward(&outcome, &layout::migrate_log(), &retry);
     }
     process::exit(code);
 }
@@ -62,12 +66,69 @@ fn parse_or_exit() -> Cli {
     }
 }
 
-fn command_user(command: &Command) -> Option<String> {
-    match command {
-        Command::Identity(args) => Some(args.user.clone()),
-        Command::StartClean(args) => args.user.clone(),
-        Command::Layout(args) => args.user.clone(),
-        Command::UploadLog(_) | Command::Version => None,
+/// What the ways forward repeat so a retry acts on the same user, network and dirs as this run, shell-quoted.
+struct Retry {
+    user: String,
+    /// `identity --network`: the legacy identity belongs to this network, not the one the config link names.
+    network: Option<String>,
+    /// `--legacy-home` and `--config-link` where they differ from the defaults.
+    paths: String,
+    switch_from: Option<String>,
+}
+
+impl Retry {
+    fn of(command: &Command) -> Self {
+        let (user, network, legacy_home, config_link, switch_from) = match command {
+            Command::Identity(a) => (
+                Some(a.user.as_str()),
+                a.network.as_deref(),
+                Some(&a.legacy_home),
+                Some(&a.config_link),
+                None,
+            ),
+            Command::StartClean(a) => (
+                a.user.as_deref(),
+                None,
+                Some(&a.legacy_home),
+                Some(&a.config_link),
+                None,
+            ),
+            Command::SwitchNetwork(a) => (
+                None,
+                None,
+                Some(&a.legacy_home),
+                Some(&a.config_link),
+                Some(a.from.as_str()),
+            ),
+            Command::Layout(a) => (a.user.as_deref(), None, Some(&a.legacy_home), None, None),
+            Command::UploadLog(_) | Command::Version => (None, None, None, None, None),
+        };
+        let mut paths = String::new();
+        if let Some(dir) = legacy_home.filter(|dir| **dir != layout::legacy_home()) {
+            paths.push_str(&format!(" --legacy-home {}", shell_quote(&dir.to_string_lossy())));
+        }
+        if let Some(link) = config_link.filter(|link| **link != layout::config_link()) {
+            paths.push_str(&format!(" --config-link {}", shell_quote(&link.to_string_lossy())));
+        }
+        Retry {
+            user: user.map_or_else(|| "<user>".to_string(), shell_quote),
+            network: network.map(shell_quote),
+            paths,
+            switch_from: switch_from.map(shell_quote),
+        }
+    }
+}
+
+/// Single-quotes a value unless it is plainly safe to paste into a shell.
+fn shell_quote(value: &str) -> String {
+    let plain = !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@%+=".contains(c));
+    if plain {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', r"'\''"))
     }
 }
 
@@ -86,7 +147,11 @@ fn run_identity(args: &IdentityArgs) -> Result<Outcome, Failure> {
         });
     }
     let account = user::resolve(&args.user, &args.legacy_home).map_err(|e| Failure::new(Stage::User, e))?;
-    let network = network::from_config_link(&args.config_link).map_err(|e| Failure::new(Stage::Network, e))?;
+    let network = match &args.network {
+        Some(name) => network::validate(name),
+        None => network::from_config_link(&args.config_link),
+    }
+    .map_err(|e| Failure::new(Stage::Network, e))?;
     migrate::migrate_identity(&IdentityRequest {
         account: &account,
         network: &network,
@@ -111,6 +176,33 @@ fn run_start_clean(args: &StartCleanArgs) -> Result<Outcome, Failure> {
         }
     };
     migrate::start_clean(&args.legacy_home, Some((&account, &network)))
+}
+
+/// Every local account, so users other than the installing one keep their identity too.
+fn run_switch_network(args: &SwitchNetworkArgs) -> Result<Outcome, Failure> {
+    let from = network::validate(&args.from).map_err(|e| Failure::new(Stage::Network, e))?;
+    let to = network::from_config_link(&args.config_link).map_err(|e| Failure::new(Stage::Network, e))?;
+    if from == to {
+        return Err(Failure::new(
+            Stage::Network,
+            format!(
+                "{} already names {from}; nothing to switch from",
+                args.config_link.display()
+            ),
+        ));
+    }
+    let (accounts, uninspected) = user::local_accounts(&layout::home_roots(), &args.legacy_home);
+    tracing::info!(%from, %to, accounts = accounts.len(), "switching network");
+    let mut report = switch::switch_network(&SwitchRequest {
+        from: &from,
+        to: &to,
+        legacy_home: &args.legacy_home,
+        accounts: &accounts,
+        toolkit_version: VERSION,
+    });
+    // A home that could not be inspected may hold an identity that stayed behind.
+    report.failed.extend(uninspected);
+    Ok(Outcome::Switched(report))
 }
 
 /// System files first, then the user's; a failed step is reported in the outcome and never a failure.
@@ -171,41 +263,112 @@ fn print_version(format: OutputFormat) {
 }
 
 /// Two stderr lines the installer prints verbatim: the reason, then the log and the ways forward.
-fn print_paths_forward(outcome: &Outcome, log_file: &Path, user: Option<&str>) {
+fn print_paths_forward(outcome: &Outcome, log_file: &Path, retry: &Retry) {
     eprintln!("gnosis_vpn-migrate: {}", outcome.reason());
-    eprintln!("log: {} | next: {}", log_file.display(), next_steps(outcome, user));
+    eprintln!("log: {} | next: {}", log_file.display(), next_steps(outcome, retry));
 }
 
-fn next_steps(outcome: &Outcome, user: Option<&str>) -> String {
-    let user = user.unwrap_or("<user>");
+fn next_steps(outcome: &Outcome, retry: &Retry) -> String {
+    const MIGRATE: &str = "sudo gnosis_vpn-migrate";
+    let Retry {
+        user,
+        network,
+        paths,
+        switch_from,
+    } = retry;
+    if let Some(from) = switch_from {
+        return format!("{MIGRATE} upload-log | {MIGRATE} switch-network --from {from}{paths}");
+    }
+    let identity = match network {
+        Some(network) => format!("{MIGRATE} identity --user {user} --network {network}{paths}"),
+        None => format!("{MIGRATE} identity --user {user}{paths}"),
+    };
+    let legacy_only = format!("{MIGRATE} start-clean{paths}");
     // On a conflict `--user` would also move the current identity aside, and the next start would generate a third one.
     if matches!(outcome, Outcome::Conflict { .. }) {
-        return format!(
-            "sudo gnosis_vpn-migrate identity --user {user} --replace (keep the legacy identity) | sudo gnosis_vpn-migrate start-clean (keep the current one)"
-        );
+        return format!("{identity} --replace (keep the legacy identity) | {legacy_only} (keep the current one)");
     }
-    format!(
-        "sudo gnosis_vpn-migrate upload-log | sudo gnosis_vpn-migrate identity --user {user} [--replace] | sudo gnosis_vpn-migrate start-clean --user {user}"
-    )
+    // `start-clean --user` resets the network the config link names; with `--network` that is not the one being migrated.
+    let fresh = match network {
+        Some(_) => legacy_only,
+        None => format!("{MIGRATE} start-clean --user {user}{paths}"),
+    };
+    format!("{MIGRATE} upload-log | {identity} [--replace] | {fresh}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_conflict_offers_the_start_clean_that_keeps_the_current_identity() {
-        let conflict = Outcome::Conflict {
+    fn retry(args: &[&str]) -> Retry {
+        let cli = Cli::try_parse_from(std::iter::once("gnosis_vpn-migrate").chain(args.iter().copied())).unwrap();
+        Retry::of(&cli.command)
+    }
+
+    fn failed() -> Outcome {
+        Outcome::from_failure(Failure::new(Stage::Destination, "x"))
+    }
+
+    fn conflict() -> Outcome {
+        Outcome::Conflict {
             network: "jura".into(),
             user: "alice".into(),
             mismatches: vec![],
-        };
-        let next = next_steps(&conflict, Some("alice"));
+        }
+    }
+
+    #[test]
+    fn a_conflict_offers_the_start_clean_that_keeps_the_current_identity() {
+        let alice = retry(&["identity", "--user", "alice"]);
+        let next = next_steps(&conflict(), &alice);
         assert!(next.contains("identity --user alice --replace"), "{next}");
         assert!(next.contains("start-clean (keep the current one)"), "{next}");
         assert!(!next.contains("start-clean --user"), "{next}");
+        assert!(next_steps(&failed(), &alice).contains("start-clean --user alice"));
+    }
 
-        let failed = Outcome::from_failure(Failure::new(Stage::Destination, "x"));
-        assert!(next_steps(&failed, Some("alice")).contains("start-clean --user alice"));
+    #[test]
+    fn a_named_network_is_repeated_and_never_reset_through_the_config_link() {
+        let alice = retry(&["identity", "--user", "alice", "--network", "jura-staging"]);
+        let next = next_steps(&failed(), &alice);
+        assert!(
+            next.contains("identity --user alice --network jura-staging [--replace]"),
+            "{next}"
+        );
+        assert!(next.ends_with("| sudo gnosis_vpn-migrate start-clean"), "{next}");
+        let next = next_steps(&conflict(), &alice);
+        assert!(next.contains("--network jura-staging --replace"), "{next}");
+    }
+
+    #[test]
+    fn custom_dirs_are_repeated_and_quoted_defaults_left_out() {
+        let custom = retry(&[
+            "identity",
+            "--user",
+            "alice",
+            "--legacy-home",
+            "/srv/my legacy",
+            "--config-link",
+            "/etc/x.toml",
+        ]);
+        let next = next_steps(&failed(), &custom);
+        assert!(
+            next.contains("identity --user alice --legacy-home '/srv/my legacy' --config-link /etc/x.toml [--replace]"),
+            "{next}"
+        );
+        assert!(next.ends_with("start-clean --user alice --legacy-home '/srv/my legacy' --config-link /etc/x.toml"));
+        assert!(!next_steps(&failed(), &retry(&["identity", "--user", "alice"])).contains("--legacy-home"));
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn a_failed_switch_offers_its_own_retry() {
+        let switch = retry(&["switch-network", "--from", "jura-dev", "--config-link", "/tmp/c.toml"]);
+        let next = next_steps(&failed(), &switch);
+        assert!(
+            next.ends_with("switch-network --from jura-dev --config-link /tmp/c.toml"),
+            "{next}"
+        );
+        assert!(!next.contains("identity"), "{next}");
     }
 }

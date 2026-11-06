@@ -198,7 +198,13 @@ gnosis_vpn-migrate [-o json|plain] <command>
 
 # Move the legacy identity into <user>'s layout (what the installer runs)
 sudo gnosis_vpn-migrate identity --user <user> [--dry-run] [--replace]
+                                 [--network <network>]
                                  [--legacy-home <dir>] [--config-link <path>]
+
+# Copy every user's identity from a retired network's dirs to the chosen
+# network's; the old network's safe stays behind and is backed up
+sudo gnosis_vpn-migrate switch-network --from <network>
+                                       [--legacy-home <dir>] [--config-link <path>]
 
 # Move the legacy identity aside and, with --user, that user's
 # networks/<network>/ dirs too, so the next start generates a fresh identity
@@ -228,13 +234,45 @@ legacy `gnosisvpn-hopr.id`, e.g. a fresh install or after `--reset-identity`),
 identity on that network: re-run with `--replace` to keep the legacy one — the
 current one moves to `networks/<network>.replaced-<ts>/` — or run `start-clean`
 to keep the current one). `--user root` is refused: the client never runs a
-worker as uid 0.
+worker as uid 0. `--network` places the legacy identity under a network other
+than the one the config link names: the installer passes the network it is
+retiring, so the identity lands next to the safe that belongs to it before
+`switch-network` moves it on.
+
+`switch-network` carries identities from a retired network (`--from`) to the
+one the config link names, for every non-root account whose passwd home is a
+dir right under `/home` or `/var/home` (Linux) or `/Users` (macOS), whoever owns
+it and also through a symlink. Accounts are found as the owner or namesake of
+each dir there and among the local accounts (`/etc/passwd` on Linux, the local
+directory node on macOS); accounts sharing a uid each count with their own home.
+Per user with
+`networks/<from>/hopr.id`:
+
+- `hopr.id` and `hopr.pass` are copied (staged and verified like `identity`) to
+  `networks/<to>/`, so the node address stays the same. The safe and PIX state
+  belong to the old network's contracts and are not copied; the client finds
+  or deploys a safe on the new network and writes a fresh `hopr.safe`.
+- A user who already has a regular `networks/<to>/hopr.id` keeps it; a link,
+  FIFO or dir by that name fails that user instead. Anything else at
+  `networks/<to>` (e.g. an orphaned cached safe) moves to
+  `networks/<to>.replaced-<ts>/` first.
+- The old network's `hopr.safe` is copied to `networks/<from>/hopr.safe.<from>.bak`
+  in the data dir, which outlives cache cleaners; the old safe's address is
+  what drains its funds. The `<from>` dirs are otherwise left in place, so
+  switching back to the old network keeps working.
+
+A legacy `.config/gnosisvpn-hopr.safe` and `curvy-pix.redb` that `identity` has
+not migrated yet are renamed to `gnosisvpn-hopr.safe.<from>.bak` and
+`curvy-pix.redb.<from>.bak`, so a later `identity` carries neither onto the new
+network. One user's failure never stops the others; the outcome lists it, as
+it does a home it could not inspect. A rerun never writes a second backup with
+the same bytes, and a backup is renamed into place only once verified.
 
 ### Output contract
 
 - **stdout**: with `--output json`, one line `{"outcome": {"type": …, …}}`
   where `type` is one of `Migrated`, `WouldMigrate`, `AlreadyMigrated`,
-  `NothingToMigrate`, `Conflict`, `StartedClean`, `Relocated`, `NothingToDo`,
+  `NothingToMigrate`, `Conflict`, `StartedClean`, `Relocated`, `Switched`, `NothingToDo`,
   `Uploaded`, `Failed` (the last carries `stage` as `{"type": …}` and `error`). Plain mode prints the same
   outcome in one or more human-readable lines. `version` prints
   `{"version": …, "package_version": …}` like the updater.
@@ -248,22 +286,26 @@ worker as uid 0.
   `gnosis_vpn-migrate identity --user <user> [--replace]`,
   `gnosis_vpn-migrate start-clean --user <user>`. A `Conflict` instead names
   `identity --user <user> --replace` and a plain `start-clean`, which keeps
-  the current identity.
+  the current identity; a failed `switch-network` names itself with its
+  `--from`. Every suggestion repeats `--network` and any non-default
+  `--legacy-home`/`--config-link`, shell-quoted; after `identity --network` the
+  fresh-start option is a plain `start-clean`, since `--user` would reset the
+  network the config link names instead.
 - **exit codes** are the installer's contract (its scripts are bash without
   `jq`), so they carry the meaning on their own. This table is
   `gnosis_vpn-migrate`'s own — note `NOPERM` means "not root" here, unlike the
   updater's "VPN not connected":
 
-| exit | `exitcode` name | meaning                                                                                                       |
-| ---- | --------------- | ------------------------------------------------------------------------------------------------------------- |
-| 0    | `OK`            | `Migrated`, `AlreadyMigrated`, `NothingToMigrate`, `WouldMigrate`, `StartedClean`, `NothingToDo`, `Uploaded`  |
-| 64   | `USAGE`         | bad arguments, unknown user, `--user root`, home missing or equal to the legacy dir                           |
-| 65   | `DATAERR`       | config link unusable (not a symlink, or its target is not a network name) while there is something to migrate |
-| 66   | `NOINPUT`       | legacy files unreadable or cannot be moved aside                                                              |
-| 70   | `SOFTWARE`      | `upload-log` failed, or anything unexpected                                                                   |
-| 73   | `CANTCREAT`     | destination write, chown or verify failure (staging dirs are removed; a re-run starts over)                   |
-| 75   | `TEMPFAIL`      | `Conflict`                                                                                                    |
-| 77   | `NOPERM`        | not running as root                                                                                           |
+| exit | `exitcode` name | meaning                                                                                                                                                                                         |
+| ---- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0    | `OK`            | `Migrated`, `AlreadyMigrated`, `NothingToMigrate`, `WouldMigrate`, `StartedClean`, `NothingToDo`, `Uploaded`, `Switched` with no failed user                                                    |
+| 64   | `USAGE`         | bad arguments, unknown user, `--user root`, home missing or equal to the legacy dir                                                                                                             |
+| 65   | `DATAERR`       | config link unusable (not a symlink, or its target is not a network name) while there is something to migrate; `--network`/`--from` not a network name; `--from` already the configured network |
+| 66   | `NOINPUT`       | legacy files unreadable or cannot be moved aside                                                                                                                                                |
+| 70   | `SOFTWARE`      | `upload-log` failed, or anything unexpected                                                                                                                                                     |
+| 73   | `CANTCREAT`     | destination write, chown or verify failure (staging dirs are removed; a re-run starts over); `Switched` with a failed user                                                                      |
+| 75   | `TEMPFAIL`      | `Conflict`                                                                                                                                                                                      |
+| 77   | `NOPERM`        | not running as root                                                                                                                                                                             |
 
 ### Log upload
 

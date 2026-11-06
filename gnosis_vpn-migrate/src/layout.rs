@@ -33,6 +33,17 @@ pub fn legacy_home() -> PathBuf {
     PathBuf::from("/var/lib/gnosisvpn")
 }
 
+/// Where `switch-network` looks for accounts; `/var/home` is the home root of image-based distros.
+#[cfg(target_os = "macos")]
+pub fn home_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("/Users")]
+}
+
+#[cfg(target_os = "linux")]
+pub fn home_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("/home"), PathBuf::from("/var/home")]
+}
+
 /// The installer's network choice: a symlink to `config-<network>.toml` (Linux) or `<network>.toml` (macOS).
 pub fn config_link() -> PathBuf {
     PathBuf::from("/etc/gnosisvpn/config.toml")
@@ -113,4 +124,9 @@ pub const NETWORKS_DIR: &str = "networks";
 
 pub fn network_dir(base: &Path, network: &str) -> PathBuf {
     base.join(NETWORKS_DIR).join(network)
+}
+
+/// A replaced network's safe, kept next to its identity once that identity moved on; named like the legacy one.
+pub fn safe_backup_file(network: &str) -> String {
+    format!("{SAFE_FILE}.{network}.bak")
 }

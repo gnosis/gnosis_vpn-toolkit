@@ -30,9 +30,32 @@ fn bad_usage_exits_64_and_help_exits_0() {
     let out = migrate().arg("identity").output().unwrap();
     assert_eq!(out.status.code(), Some(64));
     assert!(String::from_utf8_lossy(&out.stderr).contains("--user"));
+    let out = migrate().arg("switch-network").output().unwrap();
+    assert_eq!(out.status.code(), Some(64));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--from"));
     let out = migrate().arg("--help").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&out.stdout).contains("start-clean"));
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("start-clean") && help.contains("switch-network"),
+        "{help}"
+    );
+}
+
+#[test]
+fn switch_network_refuses_without_root_and_names_its_own_retry() {
+    if !unprivileged() {
+        eprintln!("skipped: running as root");
+        return;
+    }
+    let out = migrate()
+        .args(["switch-network", "--from", "jura-dev"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(77));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("switch-network --from jura-dev"), "{stderr}");
+    assert!(!stderr.contains("start-clean"), "{stderr}");
 }
 
 #[test]

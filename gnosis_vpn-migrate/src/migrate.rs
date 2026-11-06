@@ -122,6 +122,7 @@ pub enum Outcome {
         moved: Vec<Move>,
     },
     Relocated(crate::relocate::Report),
+    Switched(crate::switch::Report),
     NothingToDo,
     Uploaded {
         uuid: String,
@@ -149,6 +150,7 @@ impl Outcome {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             Outcome::Conflict { .. } => exitcode::TEMPFAIL,
+            Outcome::Switched(report) if !report.failed.is_empty() => exitcode::CANTCREAT,
             Outcome::Failed { stage, .. } => stage.exit_code(),
             _ => exitcode::OK,
         }
@@ -160,6 +162,12 @@ impl Outcome {
             Outcome::Conflict { network, user, .. } => {
                 format!("user {user} already has a different identity on network {network}")
             }
+            Outcome::Switched(report) if !report.failed.is_empty() => format!(
+                "{} problem(s) moving identities from network {} to {}",
+                report.failed.len(),
+                report.from,
+                report.to
+            ),
             Outcome::Failed { stage, error } => format!("{stage}: {error}"),
             _ => "ok".to_string(),
         }
@@ -237,6 +245,32 @@ impl fmt::Display for Outcome {
                 write_moves(f, &report.moved)?;
                 for path in &report.removed {
                     writeln!(f, "  removed {}", path.display())?;
+                }
+                for problem in &report.failed {
+                    writeln!(f, "  FAILED {}: {}", problem.path.display(), problem.error)?;
+                }
+                Ok(())
+            }
+            Outcome::Switched(report) if report.is_empty() => {
+                write!(
+                    f,
+                    "No identity on network {} to carry over to {}",
+                    report.from, report.to
+                )
+            }
+            Outcome::Switched(report) => {
+                writeln!(f, "Identities carried from network {} to {}:", report.from, report.to)?;
+                write_moves(f, &report.copied)?;
+                for path in &report.kept {
+                    writeln!(f, "  kept the identity already in {}", path.display())?;
+                }
+                if !report.safe_backups.is_empty() {
+                    writeln!(f, "Safes of network {} backed up:", report.from)?;
+                    write_moves(f, &report.safe_backups)?;
+                }
+                if !report.moved_aside.is_empty() {
+                    writeln!(f, "Moved aside:")?;
+                    write_moves(f, &report.moved_aside)?;
                 }
                 for problem in &report.failed {
                     writeln!(f, "  FAILED {}: {}", problem.path.display(), problem.error)?;
@@ -324,14 +358,15 @@ pub fn migrate_identity(req: &IdentityRequest<'_>) -> Result<Outcome, Failure> {
 
     let ts = timestamp();
     let networks = Networks::create(req.account, &layout)?;
+    let staging = networks.free_staging(req.network, &ts)?;
     let replaced = networks.move_aside(req.network, "replaced", &ts)?;
-    let staging = format!("{}.migrating-{ts}", req.network);
-    let marker = marker_content(&legacy, req.toolkit_version);
-    let installed = stage(&networks, &staging, &plan, &marker, req.account)
+    let marker = marker_content(&legacy.config_dir, req.toolkit_version);
+    let mut created = Vec::new();
+    let installed = stage(&networks, &staging, &plan, &marker, req.account, &mut created)
         .and_then(|()| publish(&networks, &staging, req.network));
     if let Err(e) = installed {
         tracing::warn!(error = %e.error, "migration failed, removing the staging dirs and restoring replaced ones");
-        networks.remove(&staging);
+        networks.remove(&staging, &created);
         networks.restore(&replaced);
         return Err(e);
     }
@@ -399,17 +434,17 @@ fn move_user_dirs_aside(account: &Account, network: &str, ts: &str) -> Result<Ve
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Place {
+pub(crate) enum Place {
     Data,
     Cache,
 }
 
-struct Planned {
-    from: PathBuf,
-    source: File,
-    place: Place,
-    rel: PathBuf,
-    sha256: [u8; 32],
+pub(crate) struct Planned {
+    pub(crate) from: PathBuf,
+    pub(crate) source: File,
+    pub(crate) place: Place,
+    pub(crate) rel: PathBuf,
+    pub(crate) sha256: [u8; 32],
 }
 
 struct Source {
@@ -709,15 +744,15 @@ impl Target {
 }
 
 /// The data and cache `networks/` dirs, held open so no later step resolves the user-controlled path again.
-struct Networks {
-    data: OwnedFd,
+pub(crate) struct Networks {
+    pub(crate) data: OwnedFd,
     cache: OwnedFd,
-    data_path: PathBuf,
+    pub(crate) data_path: PathBuf,
     cache_path: PathBuf,
 }
 
 impl Networks {
-    fn create(account: &Account, layout: &UserLayout) -> Result<Self, Failure> {
+    pub(crate) fn create(account: &Account, layout: &UserLayout) -> Result<Self, Failure> {
         let home = nofollow::open_home(&account.home).map_err(destination(&account.home))?;
         for (parent, mode) in &layout.parents {
             nofollow::ensure_dir(&home, parent, *mode, account).map_err(destination(&account.home.join(parent)))?;
@@ -746,7 +781,7 @@ impl Networks {
     }
 
     /// All or nothing: a failed cache move puts the data dir back, so the identity is never left half aside.
-    fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<(Place, Move)>, Failure> {
+    pub(crate) fn move_aside(&self, network: &str, reason: &str, ts: &str) -> Result<Vec<(Place, Move)>, Failure> {
         let mut moved = Vec::new();
         for place in [Place::Data, Place::Cache] {
             let (dir, path) = self.side(place);
@@ -763,7 +798,7 @@ impl Networks {
     }
 
     /// Best effort: the run is already failing, so a failed undo is only logged.
-    fn restore(&self, moved: &[(Place, Move)]) {
+    pub(crate) fn restore(&self, moved: &[(Place, Move)]) {
         for (place, m) in moved {
             let (dir, _) = self.side(*place);
             let (Some(original), Some(aside)) = (m.from.file_name(), m.to.file_name()) else {
@@ -776,9 +811,28 @@ impl Networks {
         }
     }
 
-    fn remove(&self, staging: &str) {
-        for place in [Place::Data, Place::Cache] {
-            let (dir, path) = self.side(place);
+    /// Free in both dirs: the timestamp repeats within a second, and another run may hold the name.
+    pub(crate) fn free_staging(&self, network: &str, ts: &str) -> Result<String, Failure> {
+        let base = format!("{network}.migrating-{ts}");
+        let mut n = 0;
+        loop {
+            let name = if n == 0 { base.clone() } else { format!("{base}.{n}") };
+            let mut taken = false;
+            for place in [Place::Data, Place::Cache] {
+                let (dir, path) = self.side(place);
+                taken |= nofollow::exists(dir, &name).map_err(destination(&path.join(&name)))?;
+            }
+            if !taken {
+                return Ok(name);
+            }
+            n += 1;
+        }
+    }
+
+    /// Only the staging dirs this run created: one another run holds under the same name is never touched.
+    pub(crate) fn remove(&self, staging: &str, created: &[Place]) {
+        for place in created {
+            let (dir, path) = self.side(*place);
             match nofollow::remove_tree(dir, staging) {
                 Ok(()) => {}
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -808,12 +862,21 @@ fn move_aside_in(
 }
 
 /// Both staging dirs stay root-owned until filled, so the user cannot plant entries in them; data first, then cache.
-fn stage(networks: &Networks, name: &str, plan: &[Planned], marker: &str, account: &Account) -> Result<(), Failure> {
+/// Each dir this run creates is pushed to `created`, which is all a failed run may remove again.
+pub(crate) fn stage(
+    networks: &Networks,
+    name: &str,
+    plan: &[Planned],
+    marker: &str,
+    account: &Account,
+    created: &mut Vec<Place>,
+) -> Result<(), Failure> {
     for place in [Place::Data, Place::Cache] {
         let (parent, parent_path) = networks.side(place);
         let path = parent_path.join(name);
         let dest = destination(&path);
         let dir = nofollow::create_dir(parent, name, layout::DIR_MODE).map_err(&dest)?;
+        created.push(place);
         for planned in plan.iter().filter(|p| p.place == place) {
             copy_verified(planned, &dir, &path, account)?;
         }
@@ -827,7 +890,12 @@ fn stage(networks: &Networks, name: &str, plan: &[Planned], marker: &str, accoun
 }
 
 /// Plain copy (rename cannot cross from /var/lib to /home), own, fsync, then hash the written bytes against the source.
-fn copy_verified(planned: &Planned, staging: &OwnedFd, staging_path: &Path, account: &Account) -> Result<(), Failure> {
+pub(crate) fn copy_verified(
+    planned: &Planned,
+    staging: &OwnedFd,
+    staging_path: &Path,
+    account: &Account,
+) -> Result<(), Failure> {
     let to = staging_path.join(&planned.rel);
     let dest = destination(&to);
     let subdir = planned.rel.parent().filter(|p| !p.as_os_str().is_empty());
@@ -857,10 +925,10 @@ fn copy_verified(planned: &Planned, staging: &OwnedFd, staging_path: &Path, acco
     Ok(())
 }
 
-fn marker_content(legacy: &Legacy, toolkit_version: &str) -> String {
+pub(crate) fn marker_content(source: &Path, toolkit_version: &str) -> String {
     format!(
         "source = {}\nmigrated_at = {}\ntoolkit_version = {toolkit_version}\n",
-        legacy.config_dir.display(),
+        source.display(),
         chrono::Utc::now().to_rfc3339(),
     )
 }
@@ -874,8 +942,8 @@ fn write_marker(staging: &OwnedFd, staging_path: &Path, content: &str, account: 
     marker.sync_all().map_err(&dest)
 }
 
-/// Data first; a failed cache rename takes the data back, so a retry starts from the same state.
-fn publish(networks: &Networks, staging: &str, network: &str) -> Result<(), Failure> {
+/// Data first; any later failure takes the published dirs back to staging, so the caller's cleanup and restore see the old state.
+pub(crate) fn publish(networks: &Networks, staging: &str, network: &str) -> Result<(), Failure> {
     let rename_failed = |path: &Path, e: io::Error| {
         Failure::new(
             Stage::Destination,
@@ -884,39 +952,50 @@ fn publish(networks: &Networks, staging: &str, network: &str) -> Result<(), Fail
     };
     nofollow::rename(&networks.data, staging, network).map_err(|e| rename_failed(&networks.data_path, e))?;
     if let Err(e) = nofollow::rename(&networks.cache, staging, network) {
-        if let Err(undo) = nofollow::rename(&networks.data, network, staging) {
-            tracing::error!(error = %undo, "cannot take the published data dir back");
-        }
+        unpublish(networks, network, staging, &[Place::Data]);
         return Err(rename_failed(&networks.cache_path, e));
     }
     for place in [Place::Data, Place::Cache] {
         let (dir, path) = networks.side(place);
-        nofollow::sync(dir).map_err(destination(path))?;
+        if let Err(e) = nofollow::sync(dir) {
+            unpublish(networks, network, staging, &[Place::Cache, Place::Data]);
+            return Err(destination(path)(e));
+        }
     }
     tracing::info!(network, "renamed into place");
     Ok(())
 }
 
-fn destination(path: &Path) -> impl Fn(io::Error) -> Failure + '_ {
+/// Best effort: the run is already failing, so a failed undo is only logged.
+fn unpublish(networks: &Networks, network: &str, staging: &str, places: &[Place]) {
+    for place in places {
+        let (dir, path) = networks.side(*place);
+        if let Err(e) = nofollow::rename(dir, network, staging) {
+            tracing::error!(path = %path.join(network).display(), error = %e, "cannot take the published dir back");
+        }
+    }
+}
+
+pub(crate) fn destination(path: &Path) -> impl Fn(io::Error) -> Failure + '_ {
     move |e| Failure::new(Stage::Destination, with_path(path, &e))
 }
 
-fn sha256(mut reader: impl io::Read) -> io::Result<[u8; 32]> {
+pub(crate) fn sha256(mut reader: impl io::Read) -> io::Result<[u8; 32]> {
     let mut hasher = Sha256::new();
     io::copy(&mut reader, &mut hasher)?;
     Ok(hasher.finalize().into())
 }
 
-fn with_path(path: &Path, e: &io::Error) -> String {
+pub(crate) fn with_path(path: &Path, e: &io::Error) -> String {
     format!("{}: {e}", path.display())
 }
 
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     chrono::Utc::now().format("%Y%m%d%H%M%S").to_string()
 }
 
 /// Two runs within one second must not rename onto each other.
-fn unique_name(dir: &OwnedFd, candidate: String) -> io::Result<String> {
+pub(crate) fn unique_name(dir: &OwnedFd, candidate: String) -> io::Result<String> {
     if !nofollow::exists(dir, &candidate)? {
         return Ok(candidate);
     }
@@ -1186,7 +1265,8 @@ mod tests {
         let legacy = Legacy::find(&fx.legacy).unwrap().unwrap();
         let plan = legacy.plan().unwrap();
         let networks = Networks::create(&fx.account, &layout::user_layout()).unwrap();
-        stage(&networks, "staging", &plan, "marker", &fx.account).unwrap();
+        let mut created = Vec::new();
+        stage(&networks, "staging", &plan, "marker", &fx.account, &mut created).unwrap();
         // A non-empty dir cannot be renamed over.
         let blocker = fx.target().cache.join("occupied");
         fs::create_dir_all(&blocker).unwrap();
@@ -1198,7 +1278,7 @@ mod tests {
             entries(&layout.data.join(layout::NETWORKS_DIR)),
             vec!["staging".to_string()]
         );
-        networks.remove("staging");
+        networks.remove("staging", &created);
         assert!(entries(&layout.data.join(layout::NETWORKS_DIR)).is_empty());
         assert_eq!(
             entries(&layout.cache.join(layout::NETWORKS_DIR)),
@@ -1207,23 +1287,65 @@ mod tests {
     }
 
     #[test]
-    fn a_planted_symlink_in_the_destination_is_never_written_through() {
+    fn a_planted_staging_name_is_skipped_never_written_through_nor_removed() {
         let fx = fixture();
         fx.with_legacy(&["id", "pass"]);
         let victim = fx._tmp.path().join("victim");
         fs::write(&victim, "root-owned bytes").unwrap();
         let networks = fx.layout().data.join(layout::NETWORKS_DIR);
         fs::create_dir_all(&networks).unwrap();
-        // The staging name is predictable to the second, so plant it for the next few seconds.
+        // The base staging name is predictable to the second, so plant it for the next few seconds.
         let now = chrono::Utc::now();
-        for offset in 0..5 {
-            let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
-            std::os::unix::fs::symlink(&victim, networks.join(format!("{NETWORK}.migrating-{ts}"))).unwrap();
+        let planted: Vec<PathBuf> = (0..5)
+            .map(|offset| {
+                let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+                networks.join(format!("{NETWORK}.migrating-{ts}"))
+            })
+            .collect();
+        for link in &planted {
+            std::os::unix::fs::symlink(&victim, link).unwrap();
         }
-        let err = fx.run(false, false).unwrap_err();
-        assert_eq!(err.stage, Stage::Destination);
+        assert!(matches!(fx.run(false, false).unwrap(), Outcome::Migrated { .. }));
         assert_eq!(fs::read_to_string(&victim).unwrap(), "root-owned bytes");
-        assert!(fx.legacy.join(".config").join(layout::LEGACY_IDENTITY_FILE).exists());
+        for link in &planted {
+            assert!(fs::symlink_metadata(link).unwrap().file_type().is_symlink());
+        }
+    }
+
+    #[test]
+    fn a_failed_run_removes_only_the_staging_dirs_it_created() {
+        // Root may chown to any uid, so only an unprivileged run fails mid-stage.
+        if user::is_root() {
+            return;
+        }
+        let mut fx = fixture();
+        fx.with_legacy(&["id", "pass"]);
+        let layout = fx.layout();
+        fs::create_dir_all(layout.data.join(layout::NETWORKS_DIR)).unwrap();
+        fs::create_dir_all(layout.cache.join(layout::NETWORKS_DIR)).unwrap();
+        let now = chrono::Utc::now();
+        let theirs: Vec<PathBuf> = (0..5)
+            .map(|offset| {
+                let ts = (now + chrono::Duration::seconds(offset)).format("%Y%m%d%H%M%S");
+                layout
+                    .data
+                    .join(layout::NETWORKS_DIR)
+                    .join(format!("{NETWORK}.migrating-{ts}"))
+            })
+            .collect();
+        for dir in &theirs {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(dir.join(layout::IDENTITY_FILE), "another run's id").unwrap();
+        }
+        fx.account.uid += 1;
+        assert_eq!(fx.run(false, false).unwrap_err().stage, Stage::Destination);
+        for dir in &theirs {
+            assert_eq!(
+                fs::read_to_string(dir.join(layout::IDENTITY_FILE)).unwrap(),
+                "another run's id"
+            );
+        }
+        assert_eq!(entries(&layout.data.join(layout::NETWORKS_DIR)).len(), theirs.len());
     }
 
     #[test]
