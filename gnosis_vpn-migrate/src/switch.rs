@@ -95,7 +95,7 @@ fn back_up_legacy_safe(legacy_home: &Path, from: &str) -> Result<Option<Move>, F
         return Ok(None);
     }
     let aside = migrate::unique_name(&config, format!("{}.{from}.bak", layout::LEGACY_SAFE_FILE)).map_err(fail)?;
-    nofollow::rename(&config, layout::LEGACY_SAFE_FILE, &aside).map_err(fail)?;
+    nofollow::rename_noreplace(&config, layout::LEGACY_SAFE_FILE, &config, &aside).map_err(fail)?;
     nofollow::sync(&config).map_err(fail)?;
     let moved = Move {
         from: config_path.join(layout::LEGACY_SAFE_FILE),
@@ -118,7 +118,7 @@ fn move_aside_legacy_pix(legacy_home: &Path, from: &str) -> Result<Option<Move>,
         return Ok(None);
     }
     let aside = migrate::unique_name(&home, format!("{}.{from}.bak", layout::PIX_DB_FILE)).map_err(fail)?;
-    nofollow::rename(&home, layout::PIX_DB_FILE, &aside).map_err(fail)?;
+    nofollow::rename_noreplace(&home, layout::PIX_DB_FILE, &home, &aside).map_err(fail)?;
     nofollow::sync(&home).map_err(fail)?;
     let moved = Move {
         from: db_path.clone(),
@@ -194,12 +194,13 @@ fn back_up_safe(
         Err(e) => return Err(fail(e)),
     };
     let sha256 = migrate::sha256(&mut safe).map_err(&fail)?;
-    let Some(name) = free_backup_name(from_data, &layout::safe_backup_file(from), &sha256).map_err(&fail)? else {
+    let base = layout::safe_backup_file(from);
+    if free_backup_name(from_data, &base, &sha256).map_err(&fail)?.is_none() {
         return Ok(None);
-    };
+    }
     // Verified inside a root-owned dir the account cannot enter, then renamed out of the held handle, so the published bytes
     // are the verified ones and a failed run leaves no partial backup under the final name.
-    let staging = migrate::unique_name(from_data, format!(".{name}.staging")).map_err(&fail)?;
+    let staging = migrate::unique_name(from_data, format!(".{base}.staging")).map_err(&fail)?;
     let staging_path = from_path.join(&staging);
     let staging_dir =
         nofollow::create_dir(from_data, &staging, layout::DIR_MODE).map_err(migrate::destination(&staging_path))?;
@@ -207,25 +208,54 @@ fn back_up_safe(
         from: safe_path.clone(),
         source: safe,
         place: Place::Data,
-        rel: PathBuf::from(&name),
+        rel: PathBuf::from(&base),
         sha256,
     };
-    let backup_path = from_path.join(&name);
     let published = migrate::copy_verified(&planned, &staging_dir, &staging_path, account).and_then(|()| {
-        nofollow::rename_across(&staging_dir, &name, from_data, &name)
-            .and_then(|()| nofollow::sync(from_data))
-            .map_err(migrate::destination(&backup_path))
+        publish_backup(&staging_dir, &base, from_data, &sha256).map_err(migrate::destination(from_path))
     });
-    if let Err(cleanup) = nofollow::remove_tree(from_data, &staging)
-        && cleanup.kind() != io::ErrorKind::NotFound
-    {
-        tracing::warn!(path = %staging_path.display(), error = %cleanup, "cannot remove the safe backup staging dir");
-    }
-    published?;
+    remove_staging(from_data, &staging, &staging_dir, &base, &staging_path);
+    let Some(name) = published? else {
+        return Ok(None);
+    };
     Ok(Some(Move {
         from: safe_path.clone(),
-        to: backup_path,
+        to: from_path.join(name),
     }))
+}
+
+/// Never replaces a backup: when a concurrent run takes the name first, the series is searched again.
+fn publish_backup(
+    staging_dir: &OwnedFd,
+    staged: &str,
+    from_data: &OwnedFd,
+    sha256: &[u8; 32],
+) -> io::Result<Option<String>> {
+    loop {
+        let Some(name) = free_backup_name(from_data, staged, sha256)? else {
+            return Ok(None);
+        };
+        match nofollow::rename_noreplace(staging_dir, staged, from_data, &name) {
+            Ok(()) => {
+                nofollow::sync(from_data)?;
+                return Ok(Some(name));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Through the held handle and never recursive: the account may have swapped its own dir in at the staging name.
+fn remove_staging(from_data: &OwnedFd, staging: &str, staging_dir: &OwnedFd, staged: &str, staging_path: &Path) {
+    if let Err(e) = nofollow::remove(staging_dir, staged)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        tracing::warn!(path = %staging_path.join(staged).display(), error = %e, "cannot remove the staged safe backup");
+    }
+    if !matches!(nofollow::remove_empty_dir(from_data, staging), Ok(true)) {
+        tracing::warn!(path = %staging_path.display(), "safe backup staging dir left in place");
+    }
 }
 
 /// The first free name in the `<base>`, `<base>.1`, … series, or `None` when a backup in it already holds these bytes.
@@ -279,14 +309,7 @@ fn has_identity(networks: &OwnedFd, network: &str) -> io::Result<bool> {
     let dir = match nofollow::find_dir(networks, network.as_ref()) {
         Ok(Some(dir)) => dir,
         Ok(None) => return Ok(false),
-        Err(e)
-            if matches!(
-                rustix::io::Errno::from_io_error(&e),
-                Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR)
-            ) =>
-        {
-            return Ok(false);
-        }
+        Err(e) if is_not_a_dir(&e) => return Ok(false),
         Err(e) => return Err(e),
     };
     match nofollow::open_regular_file(&dir, layout::IDENTITY_FILE) {
@@ -294,6 +317,11 @@ fn has_identity(networks: &OwnedFd, network: &str) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(io::Error::other(format!("{} is unusable: {e}", layout::IDENTITY_FILE))),
     }
+}
+
+fn is_not_a_dir(e: &io::Error) -> bool {
+    let errno = rustix::io::Errno::from_io_error(e);
+    matches!(errno, Some(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR))
 }
 
 #[cfg(test)]
@@ -369,7 +397,8 @@ mod tests {
     }
 
     fn mode(path: &Path) -> Mode {
-        Mode::from_raw_mode(fs::symlink_metadata(path).unwrap().mode()) & Mode::from_bits_truncate(0o777)
+        let stat = rustix::fs::lstat(path).unwrap();
+        Mode::from_raw_mode(stat.st_mode) & Mode::from_bits_truncate(0o777)
     }
 
     fn names(dir: &Path) -> Vec<String> {
@@ -697,6 +726,52 @@ mod tests {
             let meta = fs::symlink_metadata(&path).unwrap();
             assert_eq!((meta.uid(), meta.gid()), (alice.uid, alice.gid), "{}", path.display());
         }
+    }
+
+    fn open(path: &Path) -> OwnedFd {
+        nofollow::open_home(path).unwrap()
+    }
+
+    #[test]
+    fn a_backup_published_meanwhile_is_never_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let staging = data.join(".staging");
+        fs::create_dir_all(&staging).unwrap();
+        let base = layout::safe_backup_file(FROM);
+        fs::write(staging.join(&base), "this run's safe").unwrap();
+        // A concurrent run published its backup after this run picked the name.
+        fs::write(data.join(&base), "the other run's safe").unwrap();
+        let rename = nofollow::rename_noreplace(&open(&staging), &base, &open(&data), &base);
+        assert_eq!(rename.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+
+        let sha256 = migrate::sha256(fs::File::open(staging.join(&base)).unwrap()).unwrap();
+        let name = publish_backup(&open(&staging), &base, &open(&data), &sha256).unwrap();
+        assert_eq!(name, Some(format!("{base}.1")));
+        assert_eq!(fs::read_to_string(data.join(&base)).unwrap(), "the other run's safe");
+        assert_eq!(
+            fs::read_to_string(data.join(format!("{base}.1"))).unwrap(),
+            "this run's safe"
+        );
+    }
+
+    #[test]
+    fn a_dir_swapped_in_at_the_staging_name_survives_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        fs::create_dir_all(data.join(".staging")).unwrap();
+        fs::write(data.join(".staging").join("staged"), "safe").unwrap();
+        let staging_dir = open(&data.join(".staging"));
+        fs::rename(data.join(".staging"), tmp.path().join("ours")).unwrap();
+        fs::create_dir(data.join(".staging")).unwrap();
+        fs::write(data.join(".staging").join("theirs"), "the account's file").unwrap();
+
+        remove_staging(&open(&data), ".staging", &staging_dir, "staged", &data.join(".staging"));
+        assert_eq!(names(&data.join(".staging")), ["theirs"]);
+        assert!(
+            names(&tmp.path().join("ours")).is_empty(),
+            "the staged file goes through the handle"
+        );
     }
 
     #[test]
