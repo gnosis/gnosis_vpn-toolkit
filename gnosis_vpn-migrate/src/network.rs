@@ -18,14 +18,14 @@ pub fn from_config_link(link: &Path) -> Result<String, String> {
         )
     })?;
     let name = stem.strip_prefix("config-").unwrap_or(stem);
+    validate(name).map_err(|e| format!("{} points at {}; {e}", link.display(), target.display()))
+}
+
+/// A network named on the command line, held to the same rule as one read from the link.
+pub fn validate(name: &str) -> Result<String, String> {
     let valid_char = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
-    let valid = !name.is_empty() && name.chars().all(valid_char);
-    if !valid {
-        return Err(format!(
-            "{} points at {}; '{name}' is not a network name",
-            link.display(),
-            target.display()
-        ));
+    if name.is_empty() || !name.chars().all(valid_char) {
+        return Err(format!("'{name}' is not a network name"));
     }
     Ok(name.to_string())
 }
@@ -70,6 +70,14 @@ mod tests {
         ] {
             let (_dir, link) = link_to(target);
             assert!(from_config_link(&link).is_err(), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_named_network_follows_the_link_rule() {
+        assert_eq!(validate("jura-staging").unwrap(), "jura-staging");
+        for name in ["", "Jura", "../jura", "jura/dev", "jura_dev"] {
+            assert!(validate(name).is_err(), "{name}");
         }
     }
 }

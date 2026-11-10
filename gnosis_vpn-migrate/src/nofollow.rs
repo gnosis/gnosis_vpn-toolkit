@@ -7,7 +7,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
-use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, CWD, Dir, FileType, Mode, OFlags, RenameFlags};
 use rustix::process::{getegid, geteuid};
 
 use crate::user::{self, Account};
@@ -122,6 +122,22 @@ pub fn rename_across(
     to: impl AsRef<OsStr>,
 ) -> io::Result<()> {
     Ok(rustix::fs::renameat(from_dir, from.as_ref(), to_dir, to.as_ref())?)
+}
+
+/// Fails with `AlreadyExists` instead of replacing `to`, which a concurrent run may just have published.
+pub fn rename_noreplace(
+    from_dir: &OwnedFd,
+    from: impl AsRef<OsStr>,
+    to_dir: &OwnedFd,
+    to: impl AsRef<OsStr>,
+) -> io::Result<()> {
+    Ok(rustix::fs::renameat_with(
+        from_dir,
+        from.as_ref(),
+        to_dir,
+        to.as_ref(),
+        RenameFlags::NOREPLACE,
+    )?)
 }
 
 /// Removes a file, a symlink or a whole tree, never following a symlink.

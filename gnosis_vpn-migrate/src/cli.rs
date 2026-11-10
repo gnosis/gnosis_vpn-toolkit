@@ -27,6 +27,9 @@ pub enum Command {
     /// Move the legacy identity aside, and with --user that user's per-network dirs, for a fresh identity (root only).
     StartClean(StartCleanArgs),
 
+    /// Copy every user's identity from a retired network to the chosen one; the old safe stays behind, backed up (root only).
+    SwitchNetwork(SwitchNetworkArgs),
+
     /// Move files the previous release kept elsewhere into their current locations, with --user that user's app files too (root only).
     Layout(LayoutArgs),
 
@@ -51,6 +54,10 @@ pub struct IdentityArgs {
     #[arg(long, default_value_os_t = layout::config_link())]
     pub config_link: PathBuf,
 
+    /// Network the legacy identity was used on, when the config link already names its successor
+    #[arg(long)]
+    pub network: Option<String>,
+
     /// Print what would be moved without touching anything
     #[arg(long)]
     pub dry_run: bool,
@@ -67,6 +74,25 @@ pub struct StartCleanArgs {
     pub user: Option<String>,
 
     /// Legacy data dir holding `.config/gnosisvpn-hopr.*`
+    #[arg(long, default_value_os_t = layout::legacy_home())]
+    pub legacy_home: PathBuf,
+
+    /// Symlink naming the chosen network's config
+    #[arg(long, default_value_os_t = layout::config_link())]
+    pub config_link: PathBuf,
+}
+
+#[derive(Debug, clap::Args)]
+pub struct SwitchNetworkArgs {
+    /// Retired network whose per-user identities move to the chosen one
+    #[arg(long)]
+    pub from: String,
+
+    /// Network the identities move to; defaults to the one the config link names
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Legacy data dir; a safe still in its `.config` is moved aside
     #[arg(long, default_value_os_t = layout::legacy_home())]
     pub legacy_home: PathBuf,
 
