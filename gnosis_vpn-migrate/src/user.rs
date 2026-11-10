@@ -140,7 +140,10 @@ fn account_under(user: &uzers::User, roots: &[PathBuf], legacy_home: &Path) -> O
     let under_root = home
         .parent()
         .is_some_and(|parent| roots.iter().any(|root| root.as_path() == parent));
-    if user.uid() == 0 || !under_root || !home.is_dir() || same_path(home, legacy_home) {
+    let is_user_home = under_root && home.is_dir();
+    let is_root_account = user.uid() == 0;
+    let is_legacy_home = same_path(home, legacy_home);
+    if !is_user_home || is_root_account || is_legacy_home {
         return None;
     }
     let Some(name) = user.name().to_str() else {

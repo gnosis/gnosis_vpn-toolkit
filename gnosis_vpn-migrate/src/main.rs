@@ -78,45 +78,52 @@ struct Retry {
 
 impl Retry {
     fn of(command: &Command) -> Self {
-        let (user, network, legacy_home, config_link, switch_from) = match command {
-            Command::Identity(a) => (
-                Some(a.user.as_str()),
-                a.network.as_deref(),
-                Some(&a.legacy_home),
-                Some(&a.config_link),
-                None,
-            ),
-            Command::StartClean(a) => (
-                a.user.as_deref(),
-                None,
-                Some(&a.legacy_home),
-                Some(&a.config_link),
-                None,
-            ),
-            Command::SwitchNetwork(a) => (
-                None,
-                None,
-                Some(&a.legacy_home),
-                Some(&a.config_link),
-                Some(a.from.as_str()),
-            ),
-            Command::Layout(a) => (a.user.as_deref(), None, Some(&a.legacy_home), None, None),
-            Command::UploadLog(_) | Command::Version => (None, None, None, None, None),
+        let none = Retry {
+            user: "<user>".to_string(),
+            network: None,
+            paths: String::new(),
+            switch_from: None,
         };
-        let mut paths = String::new();
-        if let Some(dir) = legacy_home.filter(|dir| **dir != layout::legacy_home()) {
-            paths.push_str(&format!(" --legacy-home {}", shell_quote(&dir.to_string_lossy())));
-        }
-        if let Some(link) = config_link.filter(|link| **link != layout::config_link()) {
-            paths.push_str(&format!(" --config-link {}", shell_quote(&link.to_string_lossy())));
-        }
-        Retry {
-            user: user.map_or_else(|| "<user>".to_string(), shell_quote),
-            network: network.map(shell_quote),
-            paths,
-            switch_from: switch_from.map(shell_quote),
+        match command {
+            Command::Identity(a) => Retry {
+                user: shell_quote(&a.user),
+                network: a.network.as_deref().map(shell_quote),
+                paths: retry_paths(&a.legacy_home, Some(&a.config_link)),
+                ..none
+            },
+            Command::StartClean(a) => Retry {
+                user: a.user.as_deref().map_or(none.user.clone(), shell_quote),
+                paths: retry_paths(&a.legacy_home, Some(&a.config_link)),
+                ..none
+            },
+            Command::SwitchNetwork(a) => Retry {
+                paths: retry_paths(&a.legacy_home, Some(&a.config_link)),
+                switch_from: Some(shell_quote(&a.from)),
+                ..none
+            },
+            Command::Layout(a) => Retry {
+                user: a.user.as_deref().map_or(none.user.clone(), shell_quote),
+                paths: retry_paths(&a.legacy_home, None),
+                ..none
+            },
+            Command::UploadLog(_) | Command::Version => none,
         }
     }
+}
+
+/// `--legacy-home` and `--config-link` where they differ from the defaults.
+fn retry_paths(legacy_home: &Path, config_link: Option<&PathBuf>) -> String {
+    let mut paths = String::new();
+    if legacy_home != layout::legacy_home() {
+        paths.push_str(&format!(
+            " --legacy-home {}",
+            shell_quote(&legacy_home.to_string_lossy())
+        ));
+    }
+    if let Some(link) = config_link.filter(|link| **link != layout::config_link()) {
+        paths.push_str(&format!(" --config-link {}", shell_quote(&link.to_string_lossy())));
+    }
+    paths
 }
 
 /// Single-quotes a value unless it is plainly safe to paste into a shell.
