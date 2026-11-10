@@ -88,6 +88,10 @@ pub struct SwitchNetworkArgs {
     #[arg(long)]
     pub from: String,
 
+    /// Network the identities move to; defaults to the one the config link names
+    #[arg(long)]
+    pub to: Option<String>,
+
     /// Legacy data dir; a safe still in its `.config` is moved aside
     #[arg(long, default_value_os_t = layout::legacy_home())]
     pub legacy_home: PathBuf,

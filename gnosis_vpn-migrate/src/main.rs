@@ -73,7 +73,8 @@ struct Retry {
     network: Option<String>,
     /// `--legacy-home` and `--config-link` where they differ from the defaults.
     paths: String,
-    switch_from: Option<String>,
+    /// `switch-network`: its `--from` and `--to` flags.
+    switch: Option<String>,
 }
 
 impl Retry {
@@ -82,7 +83,7 @@ impl Retry {
             user: "<user>".to_string(),
             network: None,
             paths: String::new(),
-            switch_from: None,
+            switch: None,
         };
         match command {
             Command::Identity(a) => Retry {
@@ -98,7 +99,7 @@ impl Retry {
             },
             Command::SwitchNetwork(a) => Retry {
                 paths: retry_paths(&a.legacy_home, Some(&a.config_link)),
-                switch_from: Some(shell_quote(&a.from)),
+                switch: Some(switch_flags(&a.from, a.to.as_deref())),
                 ..none
             },
             Command::Layout(a) => Retry {
@@ -108,6 +109,13 @@ impl Retry {
             },
             Command::UploadLog(_) | Command::Version => none,
         }
+    }
+}
+
+fn switch_flags(from: &str, to: Option<&str>) -> String {
+    match to {
+        Some(to) => format!("--from {} --to {}", shell_quote(from), shell_quote(to)),
+        None => format!("--from {}", shell_quote(from)),
     }
 }
 
@@ -188,14 +196,16 @@ fn run_start_clean(args: &StartCleanArgs) -> Result<Outcome, Failure> {
 /// Every local account, so users other than the installing one keep their identity too.
 fn run_switch_network(args: &SwitchNetworkArgs) -> Result<Outcome, Failure> {
     let from = network::validate(&args.from).map_err(|e| Failure::new(Stage::Network, e))?;
-    let to = network::from_config_link(&args.config_link).map_err(|e| Failure::new(Stage::Network, e))?;
+    // An explicit `--to` lets the installer replay a move it recorded even after the link moved on.
+    let to = match &args.to {
+        Some(name) => network::validate(name),
+        None => network::from_config_link(&args.config_link),
+    }
+    .map_err(|e| Failure::new(Stage::Network, e))?;
     if from == to {
         return Err(Failure::new(
             Stage::Network,
-            format!(
-                "{} already names {from}; nothing to switch from",
-                args.config_link.display()
-            ),
+            format!("--from and --to both name {from}; nothing to switch"),
         ));
     }
     let (accounts, uninspected) = user::local_accounts(&layout::home_roots(), &args.legacy_home);
@@ -281,10 +291,10 @@ fn next_steps(outcome: &Outcome, retry: &Retry) -> String {
         user,
         network,
         paths,
-        switch_from,
+        switch,
     } = retry;
-    if let Some(from) = switch_from {
-        return format!("{MIGRATE} upload-log | {MIGRATE} switch-network --from {from}{paths}");
+    if let Some(flags) = switch {
+        return format!("{MIGRATE} upload-log | {MIGRATE} switch-network {flags}{paths}");
     }
     let identity = match network {
         Some(network) => format!("{MIGRATE} identity --user {user} --network {network}{paths}"),
@@ -377,5 +387,7 @@ mod tests {
             "{next}"
         );
         assert!(!next.contains("identity"), "{next}");
+        let explicit = retry(&["switch-network", "--from", "jura-dev", "--to", "piz-palu-dev"]);
+        assert!(next_steps(&failed(), &explicit).ends_with("switch-network --from jura-dev --to piz-palu-dev"));
     }
 }

@@ -203,7 +203,7 @@ sudo gnosis_vpn-migrate identity --user <user> [--dry-run] [--replace]
 
 # Copy every user's identity from a retired network's dirs to the chosen
 # network's; the old network's safe stays behind and is backed up
-sudo gnosis_vpn-migrate switch-network --from <network>
+sudo gnosis_vpn-migrate switch-network --from <network> [--to <network>]
                                        [--legacy-home <dir>] [--config-link <path>]
 
 # Move the legacy identity aside and, with --user, that user's
@@ -239,8 +239,9 @@ than the one the config link names: the installer passes the network it is
 retiring, so the identity lands next to the safe that belongs to it before
 `switch-network` moves it on.
 
-`switch-network` carries identities from a retired network (`--from`) to the
-one the config link names, for every non-root account whose passwd home is a
+`switch-network` carries identities from a retired network (`--from`) to
+`--to`, or without it the one the config link names (the installer always
+passes `--to`, so a recorded move replays unchanged after the link moved on), for every non-root account whose passwd home is a
 dir right under `/home` or `/var/home` (Linux) or `/Users` (macOS), whoever owns
 it and also through a symlink. Accounts are found as the owner or namesake of
 each dir there and among the local accounts (`/etc/passwd` on Linux, the local
@@ -287,7 +288,7 @@ the same bytes, and a backup is renamed into place only once verified.
   `gnosis_vpn-migrate start-clean --user <user>`. A `Conflict` instead names
   `identity --user <user> --replace` and a plain `start-clean`, which keeps
   the current identity; a failed `switch-network` names itself with its
-  `--from`. Every suggestion repeats `--network` and any non-default
+  `--from` and `--to`. Every suggestion repeats `--network` and any non-default
   `--legacy-home`/`--config-link`, shell-quoted; after `identity --network` the
   fresh-start option is a plain `start-clean`, since `--user` would reset the
   network the config link names instead.
