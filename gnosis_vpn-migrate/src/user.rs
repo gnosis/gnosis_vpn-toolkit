@@ -249,9 +249,12 @@ mod tests {
 
     #[test]
     fn the_current_user_is_found_under_its_home_root() {
+        use std::os::unix::fs::MetadataExt;
         let me = uzers::get_user_by_uid(uzers::get_effective_uid()).unwrap();
         let home = me.home_dir().to_path_buf();
-        let Some(root) = home.parent().filter(|_| !is_root() && home.is_dir()) else {
+        // A build user's root-owned home (`/var/empty` on macOS) is found only via the account list, which needs root there.
+        let owns_home = std::fs::metadata(&home).is_ok_and(|meta| meta.uid() == me.uid());
+        let Some(root) = home.parent().filter(|_| !is_root() && owns_home) else {
             return;
         };
         let (accounts, _) = local_accounts(&[root.to_path_buf()], Path::new("/var/lib/gnosisvpn"));
