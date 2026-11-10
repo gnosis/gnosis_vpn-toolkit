@@ -198,8 +198,7 @@ fn back_up_safe(
     if free_backup_name(from_data, &base, &sha256).map_err(&fail)?.is_none() {
         return Ok(None);
     }
-    // Verified inside a root-owned dir the account cannot enter, then renamed out of the held handle, so the published bytes
-    // are the verified ones and a failed run leaves no partial backup under the final name.
+    // Staged in a root-owned dir the account cannot enter, so the published bytes are the verified ones.
     let staging = migrate::unique_name(from_data, format!(".{base}.staging")).map_err(&fail)?;
     let staging_path = from_path.join(&staging);
     let staging_dir =
