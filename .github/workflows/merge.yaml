@@ -6,7 +6,7 @@ on:
     branches:
       - main
 concurrency:
-  group: merge
+  group: merge-${{ github.event.pull_request.base.ref }}
   cancel-in-progress: false
 permissions:
   contents: read
@@ -25,14 +25,15 @@ jobs:
             runner: depot-ubuntu-22.04-arm-4 # Depot Ubuntu 22.04 ARM, 4 CPUs, 16 GB RAM
             build_command: nix build -L .#binary-toolkit-aarch64-linux
           - architecture: aarch64-darwin
-            runner: depot-macos-15 # Depot Apple Silicon M2, 8 CPUs, 24 GB RAM, 400 GB SSD
+            runner: ${{ vars.MACOS_RUNNER }} # `macos-26-xlarge` or `depot-macos-26`
             build_command: nix build -L .#binary-toolkit-aarch64-darwin
-    uses: hoprnet/hopr-workflows/.github/workflows/build-binaries.yaml@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # build-binaries-v3
+    uses: hoprnet/hopr-workflows/.github/workflows/build-binaries.yaml@3df1022f4b852f1b7acd064123ce819258a62fe3 # build-binaries-v4.0.1
     permissions:
       contents: read
+      pull-requests: read
       id-token: write
     with:
-      source_branch: ${{ github.event.pull_request.base.ref }}
+      repo_sha: ${{ github.event.pull_request.merge_commit_sha }}
       version_type: pr
       architecture: ${{ matrix.architecture }}
       cachix_cache_name: gnosis-vpn-toolkit
