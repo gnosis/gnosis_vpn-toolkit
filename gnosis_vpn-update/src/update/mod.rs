@@ -73,9 +73,8 @@ pub fn compare_versions(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// Infer the channel: plain `X.Y.Z` is stable, an `experimental` segment
-/// experimental, anything else (prerelease, snapshot timestamp, build metadata)
-/// snapshot. Match segments — `+` is slugged to `-`.
+/// Infer the channel: plain `X.Y.Z` is stable, an `experimental` segment experimental,
+/// anything else (prerelease, timestamp, build metadata) snapshot; `+` is slugged to `-`.
 pub fn channel_of_version(version: &str) -> Channel {
     if version.split(['.', '-', '+']).any(|part| part == EXPERIMENTAL_SEGMENT) {
         return Channel::Experimental;
