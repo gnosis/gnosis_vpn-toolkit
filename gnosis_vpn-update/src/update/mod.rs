@@ -64,11 +64,11 @@ pub use gnosis_vpn_toolkit_common::package_version::read_installed_version;
 
 /// SemVer 2.0.0 precedence; build metadata is ignored.
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
-    // Unparseable (legacy YYYY.MM.DD+build.N, garbage) sorts below every valid version.
-    let a = semver::Version::parse(a).ok();
-    let b = semver::Version::parse(b).ok();
-    match (a, b) {
+    match (semver::Version::parse(a).ok(), semver::Version::parse(b).ok()) {
         (Some(a), Some(b)) => a.cmp_precedence(&b),
+        // Legacy YYYY.MM.DD+build.HHMMSS is zero-padded, so string order is chronological.
+        (None, None) => a.cmp(b),
+        // Unparseable (legacy, garbage) sorts below every valid version.
         (a, b) => a.is_some().cmp(&b.is_some()),
     }
 }
@@ -969,6 +969,8 @@ mod tests {
             ("1.1.0-rc.1", "1.1.0-rc.1.20261120010203"),
             ("1.1.0-rc.1.20261120010203", "1.1.0-rc.2"),
             ("2026.04.24+build.030921", "1.0.1-0.20261117010203"),
+            ("2026.04.24+build.030921", "2026.04.25+build.000001"),
+            ("2026.08.17+build.122640", "2026.08.18+build.000001"),
         ];
         for (lower, higher) in less_than {
             assert_eq!(compare_versions(lower, higher), Ordering::Less, "{lower} < {higher}");
@@ -979,7 +981,7 @@ mod tests {
             ("0.86.0", "0.86.0"),
             ("1.0.0+pr.5", "1.0.0+pr.6"),
             ("1.0.0+pr.5", "1.0.0+commit.abc1234"),
-            ("2026.04.24+build.030921", "2026.04.25+build.000001"),
+            ("2026.04.24+build.030921", "2026.04.24+build.030921"),
         ];
         for (a, b) in equal {
             assert_eq!(compare_versions(a, b), Ordering::Equal, "{a} == {b}");
@@ -1470,6 +1472,20 @@ mod tests {
             end_of_life_for(&m, "1.0.1-0.20260817122640").unwrap().version,
             "1.0.1-0.20260817122640",
         );
+    }
+
+    #[test]
+    fn end_of_life_for_orders_legacy_snapshot_cutoffs() {
+        let m = manifest_with(
+            None,
+            Some(with_eol(
+                release("2026.10.02+build.070036", "0.77.0", "14.0"),
+                vec![eol("2026.08.17+build.122640", "2026-10-15T00:00:00Z")],
+            )),
+        );
+        assert!(end_of_life_for(&m, "2026.08.17+build.122640").is_some());
+        assert!(end_of_life_for(&m, "2026.08.16+build.235959").is_some());
+        assert_eq!(end_of_life_for(&m, "2026.08.18+build.000001"), None);
     }
 
     #[test]
