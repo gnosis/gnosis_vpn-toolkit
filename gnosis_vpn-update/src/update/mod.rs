@@ -62,41 +62,19 @@ pub enum GateError {
 // Kept at this path for the engine's callers; the reader itself is toolkit-wide.
 pub use gnosis_vpn_toolkit_common::package_version::read_installed_version;
 
-/// Componentwise compare for version-like strings.
-///
-/// Splits on `.`, `-`, and `+`, parses each component as an integer (treating
-/// non-numeric chunks as `0`), and compares left-to-right padding the shorter
-/// list with `0`. Used for app versions ("0.86.0") and date-based snapshot
-/// versions with build metadata ("2026.04.24+build.030921"). Build metadata
-/// after `+` therefore participates in the compare, which matches the
-/// publishing pipeline's intent (newer builds sort higher).
-///
-/// Limitation: does **not** implement semver prerelease ordering (`-rc1` <
-/// release). If the publishing pipeline ever adopts that style, swap this
-/// for the `semver` crate.
-pub fn compare_components(a: &str, b: &str) -> Ordering {
-    fn parts(s: &str) -> Vec<u64> {
-        s.split(['.', '-', '+'])
-            .map(|p| p.parse::<u64>().unwrap_or(0))
-            .collect()
+/// SemVer 2.0.0 precedence; build metadata is ignored.
+pub fn compare_versions(a: &str, b: &str) -> Ordering {
+    match (semver::Version::parse(a).ok(), semver::Version::parse(b).ok()) {
+        (Some(a), Some(b)) => a.cmp_precedence(&b),
+        // Legacy YYYY.MM.DD+build.HHMMSS is zero-padded, so string order is chronological.
+        (None, None) => a.cmp(b),
+        // Unparseable (legacy, garbage) sorts below every valid version.
+        (a, b) => a.is_some().cmp(&b.is_some()),
     }
-    let a = parts(a);
-    let b = parts(b);
-    let n = a.len().max(b.len());
-    for i in 0..n {
-        let av = a.get(i).copied().unwrap_or(0);
-        let bv = b.get(i).copied().unwrap_or(0);
-        match av.cmp(&bv) {
-            Ordering::Less => return Ordering::Less,
-            Ordering::Greater => return Ordering::Greater,
-            Ordering::Equal => {}
-        }
-    }
-    Ordering::Equal
 }
 
-/// Infer the channel: plain dotted-numeric is stable, an `experimental` segment
-/// experimental, anything else snapshot. Match segments — `+` is slugged to `-`.
+/// Infer the channel: plain `X.Y.Z` is stable, an `experimental` segment experimental,
+/// anything else (prerelease, timestamp, build metadata) snapshot; `+` is slugged to `-`.
 pub fn channel_of_version(version: &str) -> Channel {
     if version.split(['.', '-', '+']).any(|part| part == EXPERIMENTAL_SEGMENT) {
         return Channel::Experimental;
@@ -124,7 +102,7 @@ pub fn end_of_life_for(manifest: &Manifest, current_version: &str) -> Option<End
         .end_of_life
         .iter()
         .filter(|eol| channel_of_version(&eol.version) == channel)
-        .filter(|eol| compare_components(current_version, &eol.version) != Ordering::Greater)
+        .filter(|eol| compare_versions(current_version, &eol.version) != Ordering::Greater)
         .min_by_key(|eol| eol.ends_at)
         .cloned()
 }
@@ -137,12 +115,12 @@ pub fn ensure_installable(
     target_channel: Channel,
     allow_downgrade: bool,
 ) -> Result<Ordering, GateError> {
-    let ordering = compare_components(&release.version, current_app_version);
+    let ordering = compare_versions(&release.version, current_app_version);
     if channel_of_version(current_app_version) != target_channel {
         return Ok(ordering);
     }
 
-    if compare_components(current_app_version, &release.min_app_version) == Ordering::Less {
+    if compare_versions(current_app_version, &release.min_app_version) == Ordering::Less {
         return Err(GateError::AppTooOld {
             current: current_app_version.to_string(),
             required: release.min_app_version.clone(),
@@ -979,24 +957,45 @@ mod tests {
     }
 
     #[test]
-    fn compare_components_handles_app_and_snapshot_versions() {
-        assert_eq!(compare_components("0.86.1", "0.86.0"), Ordering::Greater);
-        assert_eq!(compare_components("0.86.0", "0.86.0"), Ordering::Equal);
-        assert_eq!(compare_components("0.85.0", "0.86.0"), Ordering::Less);
-        // date-based snapshot version with build metadata (per the fixtures)
-        assert_eq!(
-            compare_components("2026.04.24+build.030922", "2026.04.24+build.030921"),
-            Ordering::Greater,
-        );
-        assert_eq!(
-            compare_components("2026.04.25+build.000001", "2026.04.24+build.999999"),
-            Ordering::Greater,
-        );
+    fn compare_versions_follows_semver_precedence() {
+        let less_than = [
+            ("0.86.0", "0.86.1"),
+            ("1.0.0-alpha.1", "1.0.0-beta.1"),
+            ("1.0.0-beta.1", "1.0.0-rc.1"),
+            ("1.0.0-rc.1", "1.0.0"),
+            ("1.0.0-rc.2", "1.0.0-rc.10"),
+            ("1.0.1-0.20261117010203", "1.0.1-0.20261118010203"),
+            ("1.0.1-0.20261118010203", "1.0.1-alpha.1"),
+            ("1.1.0-rc.1", "1.1.0-rc.1.20261120010203"),
+            ("1.1.0-rc.1.20261120010203", "1.1.0-rc.2"),
+            ("2026.04.24+build.030921", "1.0.1-0.20261117010203"),
+            ("2026.04.24+build.030921", "2026.04.25+build.000001"),
+            ("2026.08.17+build.122640", "2026.08.18+build.000001"),
+        ];
+        for (lower, higher) in less_than {
+            assert_eq!(compare_versions(lower, higher), Ordering::Less, "{lower} < {higher}");
+            assert_eq!(compare_versions(higher, lower), Ordering::Greater, "{higher} > {lower}");
+        }
+
+        let equal = [
+            ("0.86.0", "0.86.0"),
+            ("1.0.0+pr.5", "1.0.0+pr.6"),
+            ("1.0.0+pr.5", "1.0.0+commit.abc1234"),
+            ("2026.04.24+build.030921", "2026.04.24+build.030921"),
+        ];
+        for (a, b) in equal {
+            assert_eq!(compare_versions(a, b), Ordering::Equal, "{a} == {b}");
+        }
     }
 
     #[test]
     fn channel_of_version_detects_snapshot_build_metadata() {
         assert_eq!(channel_of_version("0.91.1"), Channel::Stable);
+        assert_eq!(channel_of_version("1.0.0"), Channel::Stable);
+        assert_eq!(channel_of_version("1.0.1-0.20261117010203"), Channel::Snapshot);
+        assert_eq!(channel_of_version("1.1.0-rc.1.20261120010203"), Channel::Snapshot);
+        assert_eq!(channel_of_version("1.0.0-alpha.1"), Channel::Snapshot);
+        assert_eq!(channel_of_version("1.0.0+pr.5"), Channel::Snapshot);
         assert_eq!(channel_of_version("2026.06.06+build.000005"), Channel::Snapshot);
         // Registry-slugged forms replace `+` with `-`; still not stable.
         assert_eq!(channel_of_version("2026.06.06-build.000005"), Channel::Snapshot);
@@ -1122,23 +1121,46 @@ mod tests {
         // On snapshot, switching to stable is always allowed — even to a
         // release that would compare as a downgrade or already-installed.
         let r = release("0.85.0", "0.80.0", "0.0");
-        assert!(ensure_installable(&r, "2026.06.06+build.000005", Channel::Stable, false).is_ok());
+        assert!(ensure_installable(&r, "1.0.1-0.20260606000005", Channel::Stable, false).is_ok());
 
         // On stable, switching to snapshot is likewise ungated, including the
         // min-app gate (its version scheme is incomparable across channels).
-        let r = release("2026.06.06+build.000005", "2026.01.01+build.000001", "0.0");
+        let r = release("1.0.1-0.20260606000005", "1.0.1-0.20260101000001", "0.0");
         assert!(ensure_installable(&r, "0.86.0", Channel::Snapshot, false).is_ok());
     }
 
     #[test]
     fn ensure_installable_gates_within_snapshot_channel() {
-        let r = release("2026.06.06+build.000005", "0.0", "0.0");
-        let err = ensure_installable(&r, "2026.06.06+build.000005", Channel::Snapshot, false).unwrap_err();
+        let r = release("1.0.1-0.20260606000005", "0.0.0", "0.0");
+        let err = ensure_installable(&r, "1.0.1-0.20260606000005", Channel::Snapshot, false).unwrap_err();
         assert!(matches!(err, GateError::AlreadyInstalled { .. }));
-        let err = ensure_installable(&r, "2026.07.01+build.000001", Channel::Snapshot, false).unwrap_err();
+        let err = ensure_installable(&r, "1.0.1-0.20260701000001", Channel::Snapshot, false).unwrap_err();
         assert!(matches!(err, GateError::Downgrade { .. }));
-        let ord = ensure_installable(&r, "2026.05.01+build.000009", Channel::Snapshot, false).unwrap();
+        let ord = ensure_installable(&r, "1.0.1-0.20260501000009", Channel::Snapshot, false).unwrap();
         assert_eq!(ord, Ordering::Greater);
+
+        // A final release is never a downgrade from its own prerelease snapshots.
+        let r = release("1.0.0", "0.0.0", "0.0");
+        let ord = ensure_installable(&r, "1.0.0-rc.3.20261110010203", Channel::Snapshot, false).unwrap();
+        assert_eq!(ord, Ordering::Greater);
+    }
+
+    #[test]
+    fn snapshot_fixture_in_semver_form_gates_by_precedence() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/linux-amd64-semver-snapshot.json"
+        );
+        let manifest: Manifest = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let snapshot = manifest.pick(Channel::Snapshot).unwrap();
+
+        let ord = ensure_installable(snapshot, "1.0.1-0.20261116010203", Channel::Snapshot, false).unwrap();
+        assert_eq!(ord, Ordering::Greater);
+        let err = ensure_installable(snapshot, "1.0.1-alpha.1", Channel::Snapshot, false).unwrap_err();
+        assert!(matches!(err, GateError::Downgrade { .. }));
+        // Legacy hosts sort below min_app_version and reinstall by hand.
+        let err = ensure_installable(snapshot, "2026.04.24+build.030921", Channel::Snapshot, false).unwrap_err();
+        assert!(matches!(err, GateError::AppTooOld { .. }));
     }
 
     #[test]
@@ -1421,21 +1443,49 @@ mod tests {
                 vec![eol("0.92.0", "2026-10-15T00:00:00Z")],
             )),
             Some(with_eol(
+                release("1.0.1-0.20261002070036", "0.77.0", "14.0"),
+                vec![eol("1.0.1-0.20260817122640", "2026-10-15T00:00:00Z")],
+            )),
+        );
+
+        let covered_versions = [
+            "0.92.0",
+            "0.90.1",
+            "1.0.1-0.20260817122640",
+            "1.0.1-0.20260816235959",
+            "1.0.0-rc.3.20260801000000",
+        ];
+        for covered in covered_versions {
+            assert!(end_of_life_for(&m, covered).is_some(), "{covered} should be covered");
+        }
+        let newer_versions = [
+            "0.92.1",
+            "0.95.2",
+            "1.0.1-0.20260817122641",
+            "1.0.1-0.20261002070036",
+            "1.0.1-rc.1",
+        ];
+        for newer in newer_versions {
+            assert_eq!(end_of_life_for(&m, newer), None, "{newer} should not be covered");
+        }
+        assert_eq!(
+            end_of_life_for(&m, "1.0.1-0.20260817122640").unwrap().version,
+            "1.0.1-0.20260817122640",
+        );
+    }
+
+    #[test]
+    fn end_of_life_for_orders_legacy_snapshot_cutoffs() {
+        let m = manifest_with(
+            None,
+            Some(with_eol(
                 release("2026.10.02+build.070036", "0.77.0", "14.0"),
                 vec![eol("2026.08.17+build.122640", "2026-10-15T00:00:00Z")],
             )),
         );
-
-        for covered in ["0.92.0", "0.90.1", "2026.08.17+build.122640", "2026.08.16+build.235959"] {
-            assert!(end_of_life_for(&m, covered).is_some(), "{covered} should be covered");
-        }
-        for newer in ["0.92.1", "0.95.2", "2026.08.17+build.122641", "2026.10.02+build.070036"] {
-            assert_eq!(end_of_life_for(&m, newer), None, "{newer} should not be covered");
-        }
-        assert_eq!(
-            end_of_life_for(&m, "2026.08.17+build.122640").unwrap().version,
-            "2026.08.17+build.122640",
-        );
+        assert!(end_of_life_for(&m, "2026.08.17+build.122640").is_some());
+        assert!(end_of_life_for(&m, "2026.08.16+build.235959").is_some());
+        assert_eq!(end_of_life_for(&m, "2026.08.18+build.000001"), None);
     }
 
     #[test]

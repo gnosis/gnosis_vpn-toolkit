@@ -52,6 +52,7 @@ let
         ../gnosis_vpn-update/tests/fixtures/linux-amd64.json.asc
         ../gnosis_vpn-update/tests/fixtures/linux-arm64.json
         ../gnosis_vpn-update/tests/fixtures/linux-arm64.json.asc
+        ../gnosis_vpn-update/tests/fixtures/linux-amd64-semver-snapshot.json
       ];
     };
     deps = nixLib.mkDepsSrc {
