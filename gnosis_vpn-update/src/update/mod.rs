@@ -6,8 +6,7 @@
 //! mpsc channel; the binary forwards each status to stdout as newline-delimited
 //! JSON (see `gnosis_vpn_toolkit_common::output`) instead of over a socket.
 //!
-//! The engine downloads a signed `.pkg`, SHA-256-verifies it, and runs
-//! `installer(8)`. macOS only.
+//! The engine downloads a `.pkg`, verifies its SHA-256 and signature, and runs `installer(8)`. macOS only.
 
 pub mod choices;
 mod download;
@@ -358,7 +357,7 @@ pub struct EngineInput {
 /// 1. `Checking` → resolve what to install (manifest fetch + integrity; SHA
 ///    only for now, PGP TODO)
 /// 2. `Downloading` → the `.pkg` download has started, followed by a silent
-///    SHA-256 verify
+///    SHA-256 and pkg signature verify
 /// 3. `Installing` → download finished, `installer(8)` running
 /// 4. terminal `Completed { new_version }`
 ///
@@ -433,6 +432,13 @@ async fn drive_engine(
     verify_sha256(&artifact_path, &release)
         .await
         .map_err(|e| (UpdateStage::Verify, e))?;
+
+    // installer(8) skips Gatekeeper, so an unsigned pkg would install as root.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = install_platform::verify_signature(&artifact_path).await {
+        remove_leftover(&artifact_path).await;
+        return Err((UpdateStage::Verify, e));
+    }
 
     // Pin the installer choices *before* showing the loader so a failure here
     // never leaves the window up, and the show→dismiss span below stays a
@@ -697,6 +703,34 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
     Ok(())
 }
 
+/// Team ID of the Developer ID Installer certificate that signs our pkgs.
+#[cfg(any(target_os = "macos", test))]
+const SIGNING_TEAM_ID: &str = "ZKG876RKJ8";
+
+/// Accept a `pkgutil --check-signature` report only if notarized with our Developer ID Installer leaf.
+#[cfg(any(target_os = "macos", test))]
+fn check_signature_report(report: &str) -> Result<(), String> {
+    let lines: Vec<&str> = report.lines().map(str::trim).collect();
+    let is_signed = lines.contains(&"Status: signed by a developer certificate issued by Apple for distribution");
+    let is_notarized = lines.contains(&"Notarization: trusted by the Apple notary service");
+    // Only the leaf ("1.") counts: the team ID on any other chain line proves nothing.
+    let expected_leaf_suffix = format!("({SIGNING_TEAM_ID})");
+    let is_our_installer_cert = lines
+        .iter()
+        .any(|l| l.starts_with("1. Developer ID Installer: ") && l.ends_with(&expected_leaf_suffix));
+
+    let problem = if !is_signed {
+        "pkg is not signed for distribution"
+    } else if !is_notarized {
+        "pkg is not notarized"
+    } else if !is_our_installer_cert {
+        "pkg leaf certificate is not our Developer ID Installer"
+    } else {
+        return Ok(());
+    };
+    Err(format!("{problem} (team {SIGNING_TEAM_ID}): {}", report.trim()))
+}
+
 /// Best-effort free-space probe using `statvfs(3)` on Unix. Returns `None` if
 /// the call fails — callers should treat that as "skip the check" rather than
 /// blocking the install.
@@ -834,6 +868,21 @@ pub(crate) mod install_platform {
             };
             Err(format!("installer exited with {status}: {detail}"))
         }
+    }
+
+    /// Reject the pkg unless `pkgutil` reports our notarized Developer ID Installer signature.
+    pub async fn verify_signature(path: &Path) -> Result<(), String> {
+        let output = Command::new("/usr/sbin/pkgutil")
+            .arg("--check-signature")
+            .arg(path)
+            .output()
+            .await
+            .map_err(|e| format!("pkgutil spawn failed: {e}"))?;
+        let report = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() {
+            return Err(format!("pkgutil exited with {}: {}", output.status, report.trim()));
+        }
+        super::check_signature_report(&report)
     }
 
     /// Read `pipe` to a lossy string in the background so the child never
@@ -1629,5 +1678,54 @@ mod tests {
         // Keep in step with gnosis_vpn-app's HowToUpdateModal.tsx.
         assert!(MANUAL_UPDATE_HINT.contains("sudo apt-get update"));
         assert!(MANUAL_UPDATE_HINT.contains("sudo apt-get install -y gnosisvpn"));
+    }
+
+    /// `pkgutil --check-signature` on the 1.1.0 stable pkg.
+    const SIGNED_REPORT: &str = r#"Package "u.pkg":
+   Status: signed by a developer certificate issued by Apple for distribution
+   Notarization: trusted by the Apple notary service
+   Signed with a trusted timestamp on: 2026-11-19 12:44:15 +0000
+   Certificate Chain:
+    1. Developer ID Installer: Gnosis Ltd. (ZKG876RKJ8)
+       Expires: 2027-02-01 22:12:15 +0000
+       ------------------------------------------------------------------------
+    2. Developer ID Certification Authority
+       Expires: 2027-02-01 22:12:15 +0000
+       ------------------------------------------------------------------------
+    3. Apple Root CA
+       Expires: 2035-02-09 21:40:36 +0000
+"#;
+
+    #[test]
+    fn signature_report_accepts_our_notarized_installer_pkg() {
+        assert_eq!(check_signature_report(SIGNED_REPORT), Ok(()));
+    }
+
+    #[test]
+    fn signature_report_rejects_unsigned_and_unnotarized_pkgs() {
+        let unsigned = "Package \"unsigned.pkg\":\n   Status: no signature\n";
+        let err = check_signature_report(unsigned).unwrap_err();
+        assert!(err.starts_with("pkg is not signed for distribution"), "{err}");
+
+        let unnotarized = SIGNED_REPORT.replace("   Notarization: trusted by the Apple notary service\n", "");
+        let err = check_signature_report(&unnotarized).unwrap_err();
+        assert!(err.starts_with("pkg is not notarized"), "{err}");
+    }
+
+    #[test]
+    fn signature_report_rejects_a_foreign_or_wrong_kind_leaf() {
+        let other_team = SIGNED_REPORT.replace("Gnosis Ltd. (ZKG876RKJ8)", "Someone (ABCDE12345)");
+        let application_cert = SIGNED_REPORT.replace("Developer ID Installer:", "Developer ID Application:");
+        let team_only_on_intermediate = other_team.replace(
+            "2. Developer ID Certification Authority",
+            "2. Developer ID Installer: Gnosis Ltd. (ZKG876RKJ8)",
+        );
+        for report in [other_team, application_cert, team_only_on_intermediate] {
+            let err = check_signature_report(&report).unwrap_err();
+            assert!(
+                err.starts_with("pkg leaf certificate is not our Developer ID Installer"),
+                "{err}"
+            );
+        }
     }
 }
