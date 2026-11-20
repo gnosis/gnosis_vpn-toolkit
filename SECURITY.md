@@ -124,7 +124,8 @@ gnosis_vpn-update-aarch64-darwin: explicit requirement satisfied
 line must name the signing identity above.
 
 `gnosis_vpn-update` refuses to install an update pkg unless `pkgutil --check-signature`
-reports it notarized and signed by `Developer ID Installer: Gnosis Ltd. (ZKG876RKJ8)`.
+reports it signed for distribution, notarized, and its leaf certificate is a
+`Developer ID Installer` one with Team ID `ZKG876RKJ8`.
 
 ### Clearing the Quarantine Attribute
 
