@@ -123,6 +123,9 @@ gnosis_vpn-update-aarch64-darwin: explicit requirement satisfied
 `codesign --display --verbose=4 <binary>` prints the full chain; its `Authority=`
 line must name the signing identity above.
 
+`gnosis_vpn-update` refuses to install an update pkg unless `pkgutil --check-signature`
+reports it notarized and signed by `Developer ID Installer: Gnosis Ltd. (ZKG876RKJ8)`.
+
 ### Clearing the Quarantine Attribute
 
 Only if a binary whose checksum and signature both verified is still blocked:
