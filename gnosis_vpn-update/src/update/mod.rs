@@ -6,8 +6,7 @@
 //! mpsc channel; the binary forwards each status to stdout as newline-delimited
 //! JSON (see `gnosis_vpn_toolkit_common::output`) instead of over a socket.
 //!
-//! The engine downloads a signed `.pkg`, verifies its SHA-256 and its Developer
-//! ID Installer signature, and runs `installer(8)`. macOS only.
+//! The engine downloads a `.pkg`, verifies its SHA-256 and signature, and runs `installer(8)`. macOS only.
 
 pub mod choices;
 mod download;
@@ -708,8 +707,7 @@ async fn verify_sha256(path: &std::path::Path, release: &ChannelRelease) -> Resu
 #[cfg(any(target_os = "macos", test))]
 const SIGNING_TEAM_ID: &str = "ZKG876RKJ8";
 
-/// Check a `pkgutil --check-signature` report: distribution-signed, notarized,
-/// and the leaf certificate is our Developer ID Installer.
+/// Accept a `pkgutil --check-signature` report only if notarized with our Developer ID Installer leaf.
 #[cfg(any(target_os = "macos", test))]
 fn check_signature_report(report: &str) -> Result<(), String> {
     let lines: Vec<&str> = report.lines().map(str::trim).collect();
