@@ -37,7 +37,6 @@ jobs:
             build_debug_command: nix build -L .#binary-toolkit-aarch64-darwin-dev
             required_label: ""
     uses: hoprnet/hopr-workflows/.github/workflows/build-binaries.yaml@f15435652c572ad5688af679f0e2b153c98c9773 # build-binaries-v4.0.2
-    if: ${{ github.event.pull_request.head.repo.fork == false }}
     permissions:
       contents: read
       pull-requests: read
@@ -64,7 +63,6 @@ jobs:
       apple_certificate_password: ${{ secrets.APPLE_CERTIFICATE_DEVELOPER_PASSWORD }}
   checks:
     name: Checks ${{ matrix.platform }}
-    if: ${{ github.event.pull_request.head.repo.fork == false }}
     strategy:
       fail-fast: false
       matrix:
@@ -78,26 +76,25 @@ jobs:
       - name: Run checks
         uses: hoprnet/hopr-workflows/actions/nix-action@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # nix-action-v1
         with:
-          source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+          source_branch: ${{ github.event.pull_request.head.sha || github.sha }}
           cachix_cache_name: gnosis-vpn-toolkit
           cachix_auth_token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           command: nix flake check -L --show-trace --max-jobs 1
   audit:
     name: Audit
-    if: ${{ github.event.pull_request.head.repo.fork == false }}
     runs-on: depot-ubuntu-22.04-4
     steps:
       # Its own job: the DB is fetched live, so a new RUSTSEC reddens this with no PR change.
       - name: Run cargo audit
         uses: hoprnet/hopr-workflows/actions/nix-action@9d3880d21d35d3ee6d3bc5cde6b62e91a84b56d8 # nix-action-v1
         with:
-          source_branch: ${{ github.event.pull_request.head.ref || github.ref }}
+          source_branch: ${{ github.event.pull_request.head.sha || github.sha }}
           cachix_cache_name: gnosis-vpn-toolkit
           cachix_auth_token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
           command: nix run -L .#audit
   ci-ok:
     name: CI OK
-    # Single required status check: stable across matrix expansion, label gating and fork guards.
+    # Single required status check: stable across matrix expansion and label gating.
     if: always() # a skipped job counts as passing, so never let a failed dependency skip this one
     needs: [build-binaries, checks, audit]
     runs-on: depot-ubuntu-22.04-4

@@ -1,1 +1,8 @@
-* @gnosis/ext-hopr-admin @esterlus @mjadach-iv
+# Default
+* @esterlus @mjadach-iv
+
+# CI, release and signing pipeline.
+/.github/ @esterlus @mjadach-iv @ausias-armesto
+
+# Changing ownership itself stays with org admins plus the two gvpn maintainers.
+/.github/CODEOWNERS @esterlus @mjadach-iv @gnosis/ext-hopr-admin
