@@ -563,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "gnosis_vpn-migrate"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "chrono",
  "clap",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "gnosis_vpn-toolkit-common"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "clap",
  "rustix",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "gnosis_vpn-update"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "backon",
  "bytesize",
