@@ -76,7 +76,7 @@ jobs:
           gcp_workload_identity_provider: projects/656686060169/locations/global/workloadIdentityPools/gnosisvpn-gh-pool/providers/github-provider
           zulip_api_key: ${{ secrets.GNOSIS_VPN_ZULIP_API_KEY }}
           zulip_email: ${{ secrets.GNOSIS_VPN_ZULIP_EMAIL }}
-          zulip_channel: GnosisVPN
+          zulip_channel: Gnosis VPN
           zulip_topic: Releases
           gcp_service_account: download-gnosisvpn-gh-sa@gnosisvpn-production.iam.gserviceaccount.com
           gcp_artifact_package: gnosis_vpn-toolkit
